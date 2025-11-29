@@ -120,19 +120,25 @@ mvn -B -ntp build-helper:parse-version -f "\${WORKSPACE}/pom.xml"
 # 2. Get the RAW next version component based on INC_TYPE
 case "\${INC_TYPE}" in
     MAJOR)
-        RAW_NEXT_VERSION=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null)
+        # Capture output, use || echo "" as fallback for non-zero exit
+        RAW_OUTPUT=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
         ;;
     MINOR)
-        RAW_NEXT_VERSION=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null)
+        RAW_OUTPUT=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
         ;;
     PATCH)
-        RAW_NEXT_VERSION=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextIncrementalVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null)
+        RAW_OUTPUT=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextIncrementalVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
         ;;
     *)
         echo "Unknown INC_TYPE '\${INC_TYPE}', defaulting to MINOR"
-        RAW_NEXT_VERSION=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null)
+        RAW_OUTPUT=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
         ;;
 esac
+
+# 2.5. FILTER: Strip known Maven error messages from the output if they were captured to stdout.
+# We keep the first line only, and filter out the known error string.
+RAW_NEXT_VERSION=$(echo "\${RAW_OUTPUT}" | head -n 1 | grep -v 'null object or invalid expression' || echo "")
+
 
 # 3. Sanitize the RAW version to ensure X.Y.Z semantic format and remove -SNAPSHOT
 # If the version does not contain a dot (e.g., '2'), append '.0.0'.
@@ -152,7 +158,7 @@ echo "Committing project version change"
 mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
 
 echo "Updating SNAPSHOT dependencies to latest release"
-mvn -B -ntp versions:use-releases -DprocessAllModules=true -f "\${WORKSPACE}/pom.xml" || true
+mvn -B -ntp versions:use-releases -DprocessAllModules=true -DallowSnapshots=false -f "\${WORKSPACE}/pom.xml" || true
 
 echo "Committing dependency updates"
 mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
