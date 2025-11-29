@@ -50,13 +50,53 @@ pipeline {
             }
         }
 
-        stage('Pre-checks and Build') {
-            when { expression { env.PROCEED == 'true' } }
+        stage('Compute Next Version') {
+            agent any
             steps {
-                echo 'Running pre-checks and build...'
-                // Debug workspace contents to verify checkout
-                sh 'pwd; ls -la'
-                // put build commands here
+                script {
+                    echo 'Computing candidate next versions (major, minor, patch) from pom'
+                    try {
+                        withMaven(maven: env.MAVEN_TOOL) {
+                            def nextMajor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
+                            def nextMinor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
+                            def nextPatch = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextIncrementalVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
+
+                            if (nextMinor) {
+                                env.NEXT_RELEASE = nextMinor
+                            } else if (nextPatch) {
+                                env.NEXT_RELEASE = nextPatch
+                            } else if (nextMajor) {
+                                env.NEXT_RELEASE = nextMajor
+                            }
+
+                            echo "Computed next-major: ${nextMajor}"
+                            echo "Computed next-minor: ${nextMinor}"
+                            echo "Computed next-patch: ${nextPatch}"
+                            echo "NEXT_RELEASE set to ${env.NEXT_RELEASE}"
+                        }
+                    } catch (Throwable ex) {
+                        echo "withMaven not available (${ex.getClass().getName()}: ${ex.getMessage()}), falling back to tool+withEnv" 
+                        def mvnHome = tool env.MAVEN_TOOL
+                        withEnv(["PATH+MAVEN=${mvnHome}/bin"]) {
+                            def nextMajor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
+                            def nextMinor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
+                            def nextPatch = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextIncrementalVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
+
+                            if (nextMinor) {
+                                env.NEXT_RELEASE = nextMinor
+                            } else if (nextPatch) {
+                                env.NEXT_RELEASE = nextPatch
+                            } else if (nextMajor) {
+                                env.NEXT_RELEASE = nextMajor
+                            }
+
+                            echo "Computed next-major: ${nextMajor}"
+                            echo "Computed next-minor: ${nextMinor}"
+                            echo "Computed next-patch: ${nextPatch}"
+                            echo "NEXT_RELEASE set to ${env.NEXT_RELEASE}"
+                        }
+                    }
+                }
             }
         }
 
@@ -72,8 +112,9 @@ pipeline {
 
                     echo "Updating POM based on increment type ${env.INC_TYPE}..."
 
-                    withMaven(maven: env.MAVEN_TOOL, publisherStrategy: 'EXPLICIT') {
-                        sh '''#!/bin/bash
+                    try {
+                        withMaven(maven: env.MAVEN_TOOL, publisherStrategy: 'EXPLICIT') {
+                            sh '''#!/bin/bash
 set -euo pipefail
 
 if [ ! -f pom.xml ]; then
@@ -103,9 +144,46 @@ mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
 mvn -B -ntp versions:strip-snapshot-dependencies -DprocessAllModules=true -f "\${WORKSPACE}/pom.xml" || true
 mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
                                         '''
+                        }
+                    } catch (Throwable t) {
+                        echo "withMaven not available or error (${t.getClass().getName()}), falling back to tool+withEnv"
+                        def mvnHome = tool env.MAVEN_TOOL
+                        withEnv(["PATH+MAVEN=${mvnHome}/bin"]) {
+                            sh '''#!/bin/bash
+set -euo pipefail
+
+if [ ! -f pom.xml ]; then
+    echo "ERROR: pom.xml not found in workspace"
+    exit 1
+fi
+
+echo "Parsing project version and applying increment"
+case "\${INC_TYPE}" in
+    MAJOR)
+        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=\${parsedVersion.nextMajorVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+        ;;
+    MINOR)
+        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=\${parsedVersion.nextMinorVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+        ;;
+    PATCH)
+        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=\${parsedVersion.nextIncrementalVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+        ;;
+    *)
+        echo "Unknown INC_TYPE '\${INC_TYPE}', defaulting to MINOR"
+        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=\${parsedVersion.nextMinorVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+        ;;
+esac
+
+echo "Committing changes and stripping SNAPSHOT dependencies"
+mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
+mvn -B -ntp versions:strip-snapshot-dependencies -DprocessAllModules=true -f "\${WORKSPACE}/pom.xml" || true
+mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
+                            '''
+                        }
                     }
 
                     withCredentials([usernamePassword(credentialsId: "${env.GIT_CRED}", usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PAT')]) {
+                        echo "PUSH_CHANGES=${env.PUSH_CHANGES}"
                         sh '''#!/bin/bash
 set -euo pipefail
 
@@ -139,7 +217,7 @@ EOF
     export GIT_ASKPASS="$GIT_ASKPASS_SCRIPT"
 
     BRANCH=$(git rev-parse --abbrev-ref HEAD || echo "HEAD")
-    echo "Pushing to origin $BRANCH..."
+    echo "PUSH_CHANGES=${PUSH_CHANGES}. Pushing to origin $BRANCH..."
     git push origin HEAD:$BRANCH
 
     unset GIT_ASKPASS
@@ -163,13 +241,24 @@ fi
             steps {
                 script {
                     // Ensure configured maven tool is available for this final evaluation (prevents mvn not found)
-                    def displayVersion = env.NEW_RELEASE ?: withMaven(maven: env.MAVEN_TOOL) {
-                        sh(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"UNKNOWN\"", returnStdout: true).trim()
+                    def displayVersion = env.NEW_RELEASE ?: env.NEXT_RELEASE
+                    if (!displayVersion) {
+                        try {
+                            displayVersion = withMaven(maven: env.MAVEN_TOOL) {
+                                sh(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"UNKNOWN\"", returnStdout: true).trim()
+                            }
+                        } catch (Throwable ex) {
+                            echo "withMaven not available (${ex.getClass().getName()}: ${ex.getMessage()}), falling back to tool+withEnv"
+                            def mvnHomeForFinal = tool env.MAVEN_TOOL
+                            withEnv(["PATH+MAVEN=${mvnHomeForFinal}/bin"]) {
+                                displayVersion = sh(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"UNKNOWN\"", returnStdout: true).trim()
+                            }
+                        }
                     }
                     if (displayVersion?.endsWith('-SNAPSHOT')) {
                     displayVersion = displayVersion.replaceAll('-SNAPSHOT$', '')
                     }
-                    echo "Pipeline finished. PROCEED=${env.PROCEED} INC_TYPE=${env.INC_TYPE} NEW_RELEASE=${displayVersion} PUSH_CHANGES=${env.PUSH_CHANGES}"
+                    echo "Pipeline finished. PROCEED=${env.PROCEED} INC_TYPE=${env.INC_TYPE} NEW_RELEASE=${displayVersion} NEXT_RELEASE=${env.NEXT_RELEASE} PUSH_CHANGES=${env.PUSH_CHANGES}"
                 }
             }
         }
