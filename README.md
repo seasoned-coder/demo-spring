@@ -1,3 +1,3 @@
 This needs the following plugins installed into Jenkins:
-- Maven Integration
+- Pipeline Maven Integration
 - AnsiColor
