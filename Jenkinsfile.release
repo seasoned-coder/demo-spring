@@ -138,11 +138,11 @@ case "\${INC_TYPE}" in
         ;;
 esac
 
-echo "Committing changes and stripping SNAPSHOT dependencies"
+echo "Committing changes and updating SNAPSHOT dependencies to latest release"
 mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
 
-# FIX: Force versions-maven-plugin to a known version (2.16.0) that supports the strip-snapshot-dependencies goal.
-mvn -B -ntp org.codehaus.mojo:versions-maven-plugin:2.16.0:strip-snapshot-dependencies -DprocessAllModules=true -f "\${WORKSPACE}/pom.xml" || true
+# UPDATED: Replaced strip-snapshot-dependencies with use-releases to align with the release prep intent.
+mvn -B -ntp versions:use-releases -DprocessAllModules=true -f "\${WORKSPACE}/pom.xml" || true
 
 mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
                             '''
