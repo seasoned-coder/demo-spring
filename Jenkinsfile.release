@@ -15,52 +15,65 @@ pipeline {
     }
 
     stages {
-    stage('Ask if POM needs updating') {
-        agent none
-        options { timeout(time: 1, unit: 'HOURS') }
-        steps {
-        script {
-            // multi-parameter input; returns a Map
-            def inputResult = input(
-            id: 'pomUpdate',
-            message: 'Has the POM for this project been updated with the new release version?',
-            ok: 'Submit',
-            parameters: [
-                booleanParam(name: 'PROCEED', defaultValue: true, description: 'Yes → skip POM update; No → update POM'),
-                choice(name: 'INC_TYPE', choices: ['MAJOR', 'MINOR', 'PATCH'].join('\n'), description: 'Select the version increment type to apply when updating the POM'),
-                booleanParam(name: 'PUSH_CHANGES', defaultValue: false, description: 'If true, commit and push POM changes back to origin')
-            ]
-            )
+        stage('Ask if POM needs updating') {
+            agent none
+            options { timeout(time: 1, unit: 'HOURS') }
+            steps {
+                script {
+                    // multi-parameter input; returns a Map
+                    def inputResult = input(
+                    id: 'pomUpdate',
+                    message: 'Has the POM for this project been updated with the new release version?',
+                    ok: 'Submit',
+                    parameters: [
+                        booleanParam(name: 'PROCEED', defaultValue: true, description: 'Yes → skip POM update; No → update POM'),
+                        choice(name: 'INC_TYPE', choices: ['MAJOR', 'MINOR', 'PATCH'].join('\n'), description: 'Select the version increment type to apply when updating the POM'),
+                        booleanParam(name: 'PUSH_CHANGES', defaultValue: false, description: 'If true, commit and push POM changes back to origin')
+                    ]
+                    )
 
-            env.PROCEED = inputResult.PROCEED.toString()
-            env.INC_TYPE = inputResult.INC_TYPE?.trim()
-            env.PUSH_CHANGES = inputResult.PUSH_CHANGES.toString()
+                    env.PROCEED = inputResult.PROCEED.toString()
+                    env.INC_TYPE = inputResult.INC_TYPE?.trim()
+                    env.PUSH_CHANGES = inputResult.PUSH_CHANGES.toString()
+                }
+            }
         }
-        }
-    }
 
-    stage('Pre-checks and Build') {
-        when { expression { env.PROCEED == 'true' } }
-        steps {
-        echo 'Running pre-checks and build...'
-        // put build commands here
+        stage('Checkout') {
+            agent any
+            steps {
+                echo "Ensuring workspace has a checked-out repository..."
+                // Ensure a workspace is present and checkout takes place for stages that require files
+                checkout scm
+                // Short debug listing of workspace to confirm files like pom.xml exist
+                sh 'pwd; ls -la'
+            }
         }
-    }
 
-    stage('Update POM') {
+        stage('Pre-checks and Build') {
+            when { expression { env.PROCEED == 'true' } }
+            steps {
+                echo 'Running pre-checks and build...'
+                // Debug workspace contents to verify checkout
+                sh 'pwd; ls -la'
+                // put build commands here
+            }
+        }
+
+        stage('Update POM') {
             agent any
             when { expression { env.PROCEED == 'false' } }
             options { timeout(time: 30, unit: 'MINUTES') }
             steps {
-                    script {
-                            if (!env.INC_TYPE) {
-                                    error("INC_TYPE must be provided when you answered NO to the POM update question")
-                            }
+                script {
+                    if (!env.INC_TYPE) {
+                            error("INC_TYPE must be provided when you answered NO to the POM update question")
+                    }
 
-                            echo "Updating POM based on increment type ${env.INC_TYPE}..."
+                    echo "Updating POM based on increment type ${env.INC_TYPE}..."
 
-                            withMaven(maven: env.MAVEN_TOOL, publisherStrategy: 'EXPLICIT') {
-                                    sh '''#!/bin/bash
+                    withMaven(maven: env.MAVEN_TOOL, publisherStrategy: 'EXPLICIT') {
+                        sh '''#!/bin/bash
 set -euo pipefail
 
 if [ ! -f pom.xml ]; then
@@ -90,10 +103,10 @@ mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
 mvn -B -ntp versions:strip-snapshot-dependencies -DprocessAllModules=true -f "\${WORKSPACE}/pom.xml" || true
 mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
                                         '''
-                            }
+                    }
 
-                            withCredentials([usernamePassword(credentialsId: "${env.GIT_CRED}", usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PAT')]) {
-                                    sh '''#!/bin/bash
+                    withCredentials([usernamePassword(credentialsId: "${env.GIT_CRED}", usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PAT')]) {
+                        sh '''#!/bin/bash
 set -euo pipefail
 
 git config user.name "Jenkins"
@@ -133,30 +146,33 @@ EOF
     rm -f "$GIT_ASKPASS_SCRIPT"
     git remote set-url origin "$ORIGIN_URL"
 fi
-                                        '''
-                            }
-
-                            // Capture computed new release version from POM and export to env for later stages
-                            def computed = sh(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
-                            if (computed?.endsWith('-SNAPSHOT')) {
-                                    computed = computed.replaceAll('-SNAPSHOT$', '')
-                            }
-                            env.NEW_RELEASE = computed
+                        '''
                     }
-            }
-    }
 
-    stage('Final Status') {
-        steps {
-        script {
-              def displayVersion = env.NEW_RELEASE ?: sh(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"UNKNOWN\"", returnStdout: true).trim()
-            if (displayVersion?.endsWith('-SNAPSHOT')) {
-            displayVersion = displayVersion.replaceAll('-SNAPSHOT$', '')
+                    // Capture computed new release version from POM and export to env for later stages
+                    def computed = sh(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
+                    if (computed?.endsWith('-SNAPSHOT')) {
+                            computed = computed.replaceAll('-SNAPSHOT$', '')
+                    }
+                    env.NEW_RELEASE = computed
+                }
             }
-            echo "Pipeline finished. PROCEED=${env.PROCEED} INC_TYPE=${env.INC_TYPE} NEW_RELEASE=${displayVersion} PUSH_CHANGES=${env.PUSH_CHANGES}"
         }
+
+        stage('Final Status') {
+            steps {
+                script {
+                    // Ensure configured maven tool is available for this final evaluation (prevents mvn not found)
+                    def displayVersion = env.NEW_RELEASE ?: withMaven(maven: env.MAVEN_TOOL) {
+                        sh(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"UNKNOWN\"", returnStdout: true).trim()
+                    }
+                    if (displayVersion?.endsWith('-SNAPSHOT')) {
+                    displayVersion = displayVersion.replaceAll('-SNAPSHOT$', '')
+                    }
+                    echo "Pipeline finished. PROCEED=${env.PROCEED} INC_TYPE=${env.INC_TYPE} NEW_RELEASE=${displayVersion} PUSH_CHANGES=${env.PUSH_CHANGES}"
+                }
+            }
         }
-    }
     }
 
     post {
