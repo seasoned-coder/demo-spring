@@ -147,7 +147,6 @@ mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
                             error('Windows agent not supported for POM update. Please run on a Unix agent or implement a Windows equivalent.')
                         }
                     }
-set -euo pipefail
 
 if [ ! -f pom.xml ]; then
     echo "ERROR: pom.xml not found in workspace"
