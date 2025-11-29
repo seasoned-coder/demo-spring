@@ -1,199 +1,323 @@
-//
-// Jenkins Declarative Pipeline for Multi-Module Maven Release
-//
+/* groovylint-disable DuplicateMapLiteral, LineLength */
 pipeline {
     agent any
-
-    options {
-        // Enforce clean working directory after every build
-        skipDefaultCheckout() // IMPORTANT: We perform checkout inside the stages block once.
-        timeout(time: 1, unit: 'HOURS')
-        timestamps()
-        ansiColor('xterm')
+    environment {
+        MAVEN_TOOL = 'Maven3.9.11'
+        GIT_CRED = 'GIT_RW'
     }
 
-    // Set environment variables for the release process
-    environment {
-        // Set your credentials ID here
-        // NOTE: This should be a 'Username with password' credential set up in Jenkins
-        GIT_CREDENTIALS = 'your-github-credential-id' 
-        
-        // This is a placeholder that will be updated in the "Compute Next Version" stage
-        NEXT_RELEASE = '' 
-        
-        // The branch to push the release changes to
-        TARGET_BRANCH = 'main'
+    options {
+        // ADDED: This stops Jenkins from automatically cloning/checking out the repository 
+        // at the start of every stage, relying on the explicit 'Checkout' stage instead.
+        skipDefaultCheckout()
+        ansiColor('xterm')
+        timeout(time: 1, unit: 'HOURS')
+        disableConcurrentBuilds()
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '20', artifactNumToKeepStr: '10'))
     }
 
     stages {
-        // Stage 1: Initial Workspace Setup and User Input
         stage('Ask if POM needs updating') {
+            agent none
+            options { timeout(time: 1, unit: 'HOURS') }
             steps {
                 script {
-                    // Timeout around the input is valid inside a script block
-                    timeout(time: 1, unit: 'HOURS') {
-                        input(
-                            message: 'Approve to continue the release process?',
-                            ok: 'Approve',
-                            submitter: 'MR KEVIN PEIRCE',
-                            id: 'pom_update_approval'
-                        )
-                    }
+                    // multi-parameter input; returns a Map
+                    def inputResult = input(
+                    id: 'pomUpdate',
+                    message: 'Has the POM for this project been updated with the new release version?',
+                    ok: 'Submit',
+                    parameters: [
+                        booleanParam(name: 'SKIP_POM_UPDATE', defaultValue: true, description: 'Yes → skip POM update; No → update POM'),
+                        choice(name: 'INC_TYPE', choices: ['MAJOR', 'MINOR', 'PATCH'].join('\n'), description: 'Select the version increment type to apply when updating the POM'),
+                        booleanParam(name: 'PUSH_CHANGES', defaultValue: false, description: 'If true, commit and push POM changes back to origin')
+                    ]
+                    )
+
+                    env.SKIP_POM_UPDATE = inputResult.SKIP_POM_UPDATE.toString()
+                    env.INC_TYPE = inputResult.INC_TYPE?.trim()
+                    env.PUSH_CHANGES = inputResult.PUSH_CHANGES.toString()
                 }
             }
         }
-        
-        // Stage 2: Initial Git Checkout (Explicit and controlled)
-        stage('Initial Checkout') {
+
+        stage('Checkout') {
+            agent any
             steps {
                 echo "Ensuring workspace has a checked-out repository..."
-                // Use the built-in SCM definition for a single, correct checkout
+                // Ensure a workspace is present and checkout takes place for stages that require files
                 checkout scm
-                
-                // Optional: Show directory contents to confirm checkout was successful
-                sh 'pwd'
-                sh 'ls -la'
+                // Short debug listing of workspace to confirm files like pom.xml exist
+                script {
+                    sh 'pwd; ls -la'
+                }
             }
         }
 
-        // Stage 3: Build & Test (Using the existing workspace)
         stage('Build & Test') {
+            agent any
             steps {
                 script {
-                    echo "Building and running tests for all modules"
-                    // Use withMaven for Maven tool management and automatic reporting
-                    withMaven(
-                        maven: 'Maven3.9.11',
-                        jdk: 'java-21-openjdk'
-                    ) {
-                        // The 'test' goal automatically builds all modules before running tests
+                    echo 'Building and running tests for all modules'
+                    withMaven(maven: env.MAVEN_TOOL) {
                         sh 'mvn -B -ntp test'
                     }
                 }
             }
         }
 
-        // Stage 4: Compute Next Version
         stage('Compute Next Version') {
+            agent any
             steps {
                 script {
-                    echo "Computing candidate next versions (major, minor, patch) from pom"
-                    def nextMajor, nextMinor, nextPatch
-                    
-                    // Run all Maven commands within withMaven to manage the environment
-                    withMaven(
-                        maven: 'Maven3.9.11',
-                        jdk: 'java-21-openjdk'
-                    ) {
-                        nextMajor = sh(
-                            script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f pom.xml",
-                            returnStdout: true
-                        ).trim()
-                        nextMinor = sh(
-                            script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f pom.xml",
-                            returnStdout: true
-                        ).trim()
-                        nextPatch = sh(
-                            script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextIncrementalVersion -DforceStdout -q -f pom.xml",
-                            returnStdout: true
-                        ).trim()
-                    }
+                    echo 'Computing candidate next versions (major, minor, patch) from pom'
+                    withMaven(maven: env.MAVEN_TOOL) {
+                            // These Groovy calls must include build-helper:parse-version to expose the properties
+                            def nextMajor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
+                            def nextMinor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
+                            def nextPatch = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextIncrementalVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
 
-                    echo "Computed next-major: ${nextMajor}"
-                    echo "Computed next-minor: ${nextMinor}"
-                    echo "Computed next-patch: ${nextPatch}"
-                    
-                    // For this example, we'll choose the patch version as the next release candidate
-                    NEXT_RELEASE = "${nextPatch}" 
-                    echo "NEXT_RELEASE set to ${NEXT_RELEASE}"
+                            if (nextMinor) {
+                                env.NEXT_RELEASE = nextMinor
+                            } else if (nextPatch) {
+                                env.NEXT_RELEASE = nextPatch
+                            } else if (nextMajor) {
+                                env.NEXT_RELEASE = nextMajor
+                            }
+
+                            echo "Computed next-major: ${nextMajor}"
+                            echo "Computed next-minor: ${nextMinor}"
+                            echo "Computed next-patch: ${nextPatch}"
+                            echo "NEXT_RELEASE set to ${env.NEXT_RELEASE}"
+                    }
                 }
             }
         }
 
-        // Stage 5: Update POM and Commit/Tag
         stage('Update POM') {
-            // FIX: Declarative timeout MUST be in an 'options' block, not wrapping 'steps' directly.
-            options {
-                timeout(time: 30, unit: 'MINUTES')
-            }
+            agent any
+            when { expression { env.SKIP_POM_UPDATE == 'false' } }
+            options { timeout(time: 30, unit: 'MINUTES') }
             steps {
                 script {
-                    echo "Updating POM version to ${NEXT_RELEASE}"
-                    
-                    // Set the new version and commit/tag using the release plugin
-                    withMaven(
-                        maven: 'Maven3.9.11',
-                        jdk: 'java-21-openjdk'
-                    ) {
-                        sh "mvn -B -ntp versions:set -DnewVersion=${NEXT_RELEASE} -DprocessAllModules=true"
-                        sh "mvn -B -ntp versions:set -DnewVersion=${NEXT_RELEASE} -DprocessAllModules=true -f hello-lib/pom.xml"
-                        sh "mvn -B -ntp versions:set -DnewVersion=${NEXT_RELEASE} -DprocessAllModules=true -f app/pom.xml"
-                    }
-                    
-                    echo "Committing and tagging the release version ${NEXT_RELEASE}"
-                    // Configure Git user (required for commit)
-                    sh "git config user.name 'Jenkins Release Bot'"
-                    sh "git config user.email 'jenkins@yourcompany.com'"
-                    
-                    // Add all modified POM files
-                    sh "git add pom.xml hello-lib/pom.xml app/pom.xml"
-                    
-                    // Commit the version bump
-                    sh "git commit -m '[RELEASE] Prepare release version ${NEXT_RELEASE}'"
-                    
-                    // Tag the commit
-                    sh "git tag -a v${NEXT_RELEASE} -m 'Release v${NEXT_RELEASE}'"
-                    
-                    // Push the commit and the tag
-                    // *** This is the most likely point of failure (Authentication) ***
-                    withCredentials([usernamePassword(credentialsId: env.GIT_CREDENTIALS, usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
-                        sh "git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/seasoned-coder/demo-spring.git HEAD:${TARGET_BRANCH} --tags"
-                    }
-                    
-                    // Set the POM back to a snapshot version for development
-                    def nextSnapshot = "${NEXT_RELEASE}.1-SNAPSHOT" 
-                    echo "Setting next development version to ${nextSnapshot}"
-                    withMaven(
-                        maven: 'Maven3.9.11',
-                        jdk: 'java-21-openjdk'
-                    ) {
-                        sh "mvn -B -ntp versions:set -DnewVersion=${nextSnapshot} -DprocessAllModules=true"
-                        sh "mvn -B -ntp versions:set -DnewVersion=${nextSnapshot} -DprocessAllModules=true -f hello-lib/pom.xml"
-                        sh "mvn -B -ntp versions:set -DnewVersion=${nextSnapshot} -DprocessAllModules=true -f app/pom.xml"
+                    if (!env.INC_TYPE) {
+                            error("INC_TYPE must be provided when you answered NO to the POM update question")
                     }
 
-                    // Commit the snapshot bump
-                    sh "git add pom.xml hello-lib/pom.xml app/pom.xml"
-                    sh "git commit -m '[CI] Back to development snapshot ${nextSnapshot}'"
+                    echo "Updating POM based on increment type ${env.INC_TYPE}..."
 
-                    // Push the snapshot commit
-                    withCredentials([usernamePassword(credentialsId: env.GIT_CREDENTIALS, usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
-                        sh "git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/seasoned-coder/demo-spring.git HEAD:${TARGET_BRANCH}"
+                    withMaven(maven: env.MAVEN_TOOL, publisherStrategy: 'EXPLICIT') {
+                        sh '''#!/bin/bash
+set -euo pipefail
+
+if [ ! -f pom.xml ]; then
+    echo "ERROR: pom.xml not found in workspace"
+    exit 1
+fi
+
+echo "Parsing project version and calculating next semantic version"
+
+# Get current version for comparison
+CURRENT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
+NEEDS_REVERT=0
+
+# If the version does not end in -SNAPSHOT (e.g., 1.0.0), temporarily append it 
+# so build-helper can correctly calculate the next release number (1.0.1, 1.1.0, 2.0.0).
+if [[ "\${CURRENT_VERSION}" != *"-SNAPSHOT" ]]; then
+    NEEDS_REVERT=1
+    echo "Current version '\${CURRENT_VERSION}' does not end in -SNAPSHOT. Temporarily setting to SNAPSHOT for calculation."
+    # Temporarily set to SNAPSHOT without committing or backup
+    mvn -B -ntp versions:set -DnewVersion="\${CURRENT_VERSION}-SNAPSHOT" -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+fi
+
+# 1. Ensure build-helper:parse-version runs to populate properties on the (possibly) SNAPSHOT-suffixed POM
+mvn -B -ntp build-helper:parse-version -f "\${WORKSPACE}/pom.xml"
+
+# 2. Get the RAW next version component based on INC_TYPE
+case "\${INC_TYPE}" in
+    MAJOR)
+        # RAW_OUTPUT contains the Maven output, which might include noise/errors
+        RAW_OUTPUT=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
+        ;;
+    MINOR)
+        RAW_OUTPUT=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
+        ;;
+    PATCH)
+        RAW_OUTPUT=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextIncrementalVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
+        ;;
+    *)
+        echo "Unknown INC_TYPE '\${INC_TYPE}', defaulting to MINOR"
+        RAW_OUTPUT=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
+        ;;
+esac
+
+# 2.5. ROBUST FILTERING: Extract the last line containing only digits, and strip all surrounding whitespace.
+RAW_NEXT_VERSION=$(echo "\${RAW_OUTPUT}" | grep -E '^[0-9]+$' | tail -1 | tr -d '[:space:]' || echo "")
+
+echo "Raw version component extracted: '\${RAW_NEXT_VERSION}'" # Use quotes to inspect for hidden whitespace/chars
+
+# 2.7. Revert temporary SNAPSHOT change if it was added
+if [ "\${NEEDS_REVERT}" -eq 1 ]; then
+    echo "Reverting temporary -SNAPSHOT suffix to original version: \${CURRENT_VERSION}"
+    mvn -B -ntp versions:revert -f "\${WORKSPACE}/pom.xml" || true
+fi
+
+
+# 3. Sanitize the RAW version to ensure X.Y.Z semantic format
+# If the version does not contain a dot (e.g., '1'), append '.0.0'.
+if [[ "\${RAW_NEXT_VERSION}" != *.* ]]; then
+    # If calculation failed (empty string), it defaults to '1.0.0' as a final safeguard.
+    if [ -z "\${RAW_NEXT_VERSION}" ]; then
+        echo "WARNING: Version calculation failed, defaulting to 1.0.0." >&2
+        NEW_RELEASE_VERSION="1.0.0"
+    else
+        # To calculate MINOR/PATCH correctly, we need to fetch the major and minor parts separately 
+        # (using the same robust filtering method)
+        
+        # Helper function to get clean numeric component
+        get_clean_component() {
+            local expression="$1"
+            # Get output, filter for lines with only digits, take the last one, and trim whitespace
+            mvn -B -ntp help:evaluate -Dexpression="\${expression}" -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null | grep -E '^[0-9]+$' | tail -1 | tr -d '[:space:]' || echo "0"
+        }
+
+        if [ "\${INC_TYPE}" = "MINOR" ]; then
+             CURRENT_MAJOR=$(get_clean_component "parsedVersion.majorVersion")
+             CURRENT_MINOR_INCREMENT="\${RAW_NEXT_VERSION}"
+             NEW_RELEASE_VERSION="\${CURRENT_MAJOR}.\${CURRENT_MINOR_INCREMENT}.0"
+
+        elif [ "\${INC_TYPE}" = "PATCH" ]; then
+             CURRENT_MAJOR=$(get_clean_component "parsedVersion.majorVersion")
+             CURRENT_MINOR=$(get_clean_component "parsedVersion.minorVersion")
+             CURRENT_PATCH_INCREMENT="\${RAW_NEXT_VERSION}"
+             NEW_RELEASE_VERSION="\${CURRENT_MAJOR}.\${CURRENT_MINOR}.\${CURRENT_PATCH_INCREMENT}"
+
+        else # Must be MAJOR
+            NEW_RELEASE_VERSION="\${RAW_NEXT_VERSION}.0.0"
+        fi
+
+    fi
+else
+    # This block is for if RAW_NEXT_VERSION contains a dot (which it shouldn't if we extract a single component)
+    # If it happens, we ensure no -SNAPSHOT remains.
+    NEW_RELEASE_VERSION="\$(echo "\${RAW_NEXT_VERSION}" | sed 's/-SNAPSHOT$//')"
+fi
+
+echo "Setting new semantic release version: \${NEW_RELEASE_VERSION}"
+
+# 4. Apply the fully qualified, non-SNAPSHOT version
+mvn -B -ntp versions:set -DnewVersion="\${NEW_RELEASE_VERSION}" -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+
+echo "Committing project version change"
+mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
+
+echo "Updating SNAPSHOT dependencies to latest release"
+mvn -B -ntp versions:use-releases -DprocessAllModules=true -DallowSnapshots=false -f "\${WORKSPACE}/pom.xml" || true
+
+echo "Committing dependency updates"
+mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
+                            '''
                     }
+
+                    withCredentials([usernamePassword(credentialsId: "${env.GIT_CRED}", usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PAT')]) {
+                        echo "PUSH_CHANGES=${env.PUSH_CHANGES}"
+                        
+                        sh '''#!/bin/bash
+set -euo pipefail
+
+git config user.name "Jenkins"
+git config user.email "jenkins@example.com"
+
+# 1. Get the new version that was just applied to the POM (clean, non-SNAPSHOT version)
+# We ensure we get the correct version from the parent pom.xml by using the local workspace file path
+NEW_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f "\${WORKSPACE}/pom.xml" 2>/dev/null | sed 's/-SNAPSHOT$//' || echo "1.0.0")
+NEW_RELEASE_BRANCH="release-\${NEW_VERSION}"
+
+# 2. Commit the changes (happens on detached HEAD)
+git add -A
+if git diff --staged --quiet; then
+    echo "No pom changes to commit"
+else
+    # Use the cleaned version for the commit message
+    git commit -m "[maven-release] Set release version to \${NEW_VERSION}" || true
+    
+    # 3. Create a new local branch pointing to the new commit (HEAD)
+    echo "Creating new local branch: \${NEW_RELEASE_BRANCH} pointing to HEAD"
+    git branch "\${NEW_RELEASE_BRANCH}" HEAD
+
+    # 4. Define the timestamped tag
+    TIMESTAMP=$(date +%Y%m%d%H%M%S)
+    RELEASE_TAG="\${NEW_VERSION}-\${TIMESTAMP}"
+    echo "Creating tag: \${RELEASE_TAG}"
+    git tag -a "\${RELEASE_TAG}" -m "Release tag \${RELEASE_TAG}" HEAD
+fi
+
+if [ "\${PUSH_CHANGES}" = "true" ]; then
+    ORIGIN_URL=$(git remote get-url origin || echo "")
+    if [ -z "$ORIGIN_URL" ]; then
+        echo "ERROR: no origin remote defined; cannot push" >&2
+        exit 1
+    fi
+
+    AUTH_URL_WITH_USER=$(echo "$ORIGIN_URL" | sed -E "s#https://(.*)#https://\${GIT_USER}@\\1#")
+    git remote set-url origin "$AUTH_URL_WITH_USER"
+
+    GIT_ASKPASS_SCRIPT=/tmp/git-askpass-$$.sh
+    cat > "$GIT_ASKPASS_SCRIPT" <<'EOF'
+#!/bin/bash
+echo "\${GIT_PAT}"
+EOF
+    chmod +x "$GIT_ASKPASS_SCRIPT"
+    export GIT_ASKPASS="$GIT_ASKPASS_SCRIPT"
+
+    echo "PUSH_CHANGES=${PUSH_CHANGES}. Pushing new branch \${NEW_RELEASE_BRANCH} and tag \${RELEASE_TAG} to origin..."
+    # Push the new local branch to the remote, creating it there.
+    git push origin "\${NEW_RELEASE_BRANCH}"
+    
+    # Push the newly created tag
+    git push origin "\${RELEASE_TAG}"
+
+    unset GIT_ASKPASS
+    rm -f "$GIT_ASKPASS_SCRIPT"
+    git remote set-url origin "$ORIGIN_URL"
+fi
+                            '''
+                    }
+
+                    // Capture computed new release version from POM and export to env for later stages
+                    def computed = sh(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
+                    if (computed?.endsWith('-SNAPSHOT')) {
+                            computed = computed.replaceAll('-SNAPSHOT$', '')
+                    }
+                    env.NEW_RELEASE = computed
                 }
             }
         }
-        
-        // Stage 6: Deploy Artifacts (Optional, replace with your actual deployment logic)
-        stage('Deploy') {
-            when {
-                // Only run deploy if the previous Git push succeeded
-                expression { return true }
-            }
+
+        stage('Final Status') {
             steps {
                 script {
-                    echo "Skipping formal deployment step. Artifacts are now in Git/Tagged."
-                    // If you need to deploy artifacts to Maven Central or Artifactory:
-                    /*
-                    withMaven(
-                        maven: 'Maven3.9.11',
-                        jdk: 'java-21-openjdk',
-                        options: [artifactsPublisher(id: 'your-server-id')] 
-                    ) {
-                        sh 'mvn -B -ntp deploy'
+                    // Ensure configured maven tool is available for this final evaluation (prevents mvn not found)
+                    def displayVersion = env.NEW_RELEASE ?: env.NEXT_RELEASE
+                    if (!displayVersion) {
+                        displayVersion = withMaven(maven: env.MAVEN_TOOL) {
+                            sh(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"UNKNOWN\"", returnStdout: true).trim()
+                        }
                     }
-                    */
+                    if (displayVersion?.endsWith('-SNAPSHOT')) {
+                    displayVersion = displayVersion.replaceAll('-SNAPSHOT$', '')
+                    }
+                    echo "Pipeline finished. SKIP_POM_UPDATE=${env.SKIP_POM_UPDATE} INC_TYPE=${env.INC_TYPE} NEW_RELEASE=${displayVersion} NEXT_RELEASE=${env.NEXT_RELEASE} PUSH_CHANGES=${env.PUSH_CHANGES}"
                 }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+            echo 'Cleanup or additional post steps can be run here.'
             }
         }
     }
