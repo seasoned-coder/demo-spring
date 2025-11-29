@@ -1,13 +1,4 @@
-package kjp.demo;
-
-import org.springframework.boot.SpringApplication;
-import org.springframework.boot.autoconfigure.SpringBootApplication;
-
-@SpringBootApplication
-public class DemoApplication {
-
-	public static void main(String[] args) {
-		SpringApplication.run(DemoApplication.class, args);
-	}
-
-}
+// Developer note: The application has been moved to the `app` module. This file is deprecated.
+// See app/src/main/java/kjp/demo/DemoApplication.java for the active application entry point.
+package kjp.demo; 
+public class DemoApplication { }
