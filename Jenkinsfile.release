@@ -30,9 +30,6 @@ pipeline {
         stage('Ask if POM needs updating') {
             steps {
                 script {
-                    // Check if the current workspace already has the repository checked out from a previous stage/run.
-                    // This initial step uses the declarative pipeline's implicit checkout to get the file,
-                    // but we ensure all code runs on the same agent and workspace.
                     timeout(time: 1, unit: 'HOURS') {
                         input(
                             message: 'Approve to continue the release process?',
@@ -45,14 +42,11 @@ pipeline {
             }
         }
         
-        // Stage 2: Initial Git Checkout (Explicit and controlled)
-        // We do this here once to ensure the environment is fully set up
-        // and we have the clean files in the standard workspace.
+        // Stage 2: Initial Git Checkout (Explicit and controlled - RUNS ONCE)
         stage('Initial Checkout') {
             steps {
-                echo "Ensuring workspace has a checked-out repository..."
-                // Use the built-in SCM definition for a single, correct checkout
-                // This replaces all redundant checkouts in other stages
+                echo "Ensuring workspace has a checked-out repository (run once)..."
+                // Uses the SCM definition from the job configuration
                 checkout scm
                 
                 // Optional: Show directory contents to confirm checkout was successful
@@ -71,7 +65,6 @@ pipeline {
                         maven: 'Maven3.9.11',
                         jdk: 'java-21-openjdk'
                     ) {
-                        // The 'test' goal automatically builds all modules before running tests
                         sh 'mvn -B -ntp test'
                     }
                 }
@@ -85,7 +78,6 @@ pipeline {
                     echo "Computing candidate next versions (major, minor, patch) from pom"
                     def nextMajor, nextMinor, nextPatch
                     
-                    // Run all Maven commands within withMaven to manage the environment
                     withMaven(
                         maven: 'Maven3.9.11',
                         jdk: 'java-21-openjdk'
@@ -108,8 +100,7 @@ pipeline {
                     echo "Computed next-minor: ${nextMinor}"
                     echo "Computed next-patch: ${nextPatch}"
                     
-                    // For this example, we'll choose the patch version as the next release candidate
-                    // Use the input step (or another method) to let the user select the final version
+                    // We'll choose the patch version as the next release candidate
                     NEXT_RELEASE = "${nextPatch}" 
                     echo "NEXT_RELEASE set to ${NEXT_RELEASE}"
                 }
@@ -118,86 +109,74 @@ pipeline {
 
         // Stage 5: Update POM and Commit/Tag
         stage('Update POM') {
-            timeout(time: 30, unit: 'MINUTES') {
-                steps {
-                    script {
-                        echo "Updating POM version to ${NEXT_RELEASE}"
-                        
-                        // Set the new version and commit/tag using the release plugin
-                        withMaven(
-                            maven: 'Maven3.9.11',
-                            jdk: 'java-21-openjdk'
-                        ) {
-                            sh "mvn -B -ntp versions:set -DnewVersion=${NEXT_RELEASE} -DprocessAllModules=true"
-                            sh "mvn -B -ntp versions:set -DnewVersion=${NEXT_RELEASE} -DprocessAllModules=true -f hello-lib/pom.xml"
-                            sh "mvn -B -ntp versions:set -DnewVersion=${NEXT_RELEASE} -DprocessAllModules=true -f app/pom.xml"
+            // FIX: The 'timeout' directive MUST be wrapped in an 'options' block inside the stage.
+            options {
+                timeout(time: 30, unit: 'MINUTES')
+            }
+            steps {
+                script {
+                    echo "Updating POM version to ${NEXT_RELEASE}"
+                    
+                    // Set the new version and commit/tag using the release plugin
+                    withMaven(
+                        maven: 'Maven3.9.11',
+                        jdk: 'java-21-openjdk'
+                    ) {
+                        // Apply the version change to all modules
+                        sh "mvn -B -ntp versions:set -DnewVersion=${NEXT_RELEASE} -DprocessAllModules=true"
+                        sh "mvn -B -ntp versions:set -DnewVersion=${NEXT_RELEASE} -DprocessAllModules=true -f hello-lib/pom.xml"
+                        sh "mvn -B -ntp versions:set -DnewVersion=${NEXT_RELEASE} -DprocessAllModules=true -f app/pom.xml"
+                    }
+                    
+                    echo "Committing and tagging the release version ${NEXT_RELEASE}"
+                    // Configure Git user (required for commit)
+                    sh "git config user.name 'Jenkins Release Bot'"
+                    sh "git config user.email 'jenkins@yourcompany.com'"
+                    
+                    // Add all modified POM files
+                    sh "git add pom.xml hello-lib/pom.xml app/pom.xml"
+                    
+                    // Commit the version bump
+                    sh "git commit -m '[RELEASE] Prepare release version ${NEXT_RELEASE}'"
+                    
+                    // Tag the commit
+                    sh "git tag -a v${NEXT_RELEASE} -m 'Release v${NEXT_RELEASE}'"
+                    
+                    // Push the commit and the tag (This is where the failure is expected if auth is wrong)
+                    withCredentials([usernamePassword(credentialsId: env.GIT_CREDENTIALS, usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
+                        // Push commit and tags in one go
+                        sh "git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/seasoned-coder/demo-spring.git HEAD:${TARGET_BRANCH} --tags"
+                    }
+                    
+                    // Set the POM back to a snapshot version for development
+                    def nextSnapshot = "${NEXT_RELEASE}.1-SNAPSHOT" 
+                    echo "Setting next development version to ${nextSnapshot}"
+                    withMaven(
+                        maven: 'Maven3.9.11',
+                        jdk: 'java-21-openjdk'
+                    ) {
+                        sh "mvn -B -ntp versions:set -DnewVersion=${nextSnapshot} -DprocessAllModules=true"
+                        sh "mvn -B -ntp versions:set -DnewVersion=${nextSnapshot} -DprocessAllModules=true -f hello-lib/pom.xml"
+                        sh "mvn -B -ntp versions:set -DnewVersion=${nextSnapshot} -DprocessAllModules=true -f app/pom.xml"
+                    }
 
-                        }
-                        
-                        echo "Committing and tagging the release version ${NEXT_RELEASE}"
-                        // Configure Git user (required for commit)
-                        sh "git config user.name 'Jenkins Release Bot'"
-                        sh "git config user.email 'jenkins@yourcompany.com'"
-                        
-                        // Add all modified POM files
-                        sh "git add pom.xml hello-lib/pom.xml app/pom.xml"
-                        
-                        // Commit the version bump
-                        sh "git commit -m '[RELEASE] Prepare release version ${NEXT_RELEASE}'"
-                        
-                        // Tag the commit
-                        sh "git tag -a v${NEXT_RELEASE} -m 'Release v${NEXT_RELEASE}'"
-                        
-                        // Push the commit and the tag
-                        // *** This is the most likely point of failure (Authentication) ***
-                        withCredentials([usernamePassword(credentialsId: env.GIT_CREDENTIALS, usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
-                            sh "git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/seasoned-coder/demo-spring.git HEAD:${TARGET_BRANCH} --tags"
-                        }
-                        
-                        // Set the POM back to a snapshot version for development
-                        def nextSnapshot = "${NEXT_RELEASE}.1-SNAPSHOT" 
-                        echo "Setting next development version to ${nextSnapshot}"
-                        withMaven(
-                            maven: 'Maven3.9.11',
-                            jdk: 'java-21-openjdk'
-                        ) {
-                            sh "mvn -B -ntp versions:set -DnewVersion=${nextSnapshot} -DprocessAllModules=true"
-                            sh "mvn -B -ntp versions:set -DnewVersion=${nextSnapshot} -DprocessAllModules=true -f hello-lib/pom.xml"
-                            sh "mvn -B -ntp versions:set -DnewVersion=${nextSnapshot} -DprocessAllModules=true -f app/pom.xml"
-                        }
+                    // Commit the snapshot bump
+                    sh "git add pom.xml hello-lib/pom.xml app/pom.xml"
+                    sh "git commit -m '[CI] Back to development snapshot ${nextSnapshot}'"
 
-                        // Commit the snapshot bump
-                        sh "git add pom.xml hello-lib/pom.xml app/pom.xml"
-                        sh "git commit -m '[CI] Back to development snapshot ${nextSnapshot}'"
-
-                        // Push the snapshot commit
-                        withCredentials([usernamePassword(credentialsId: env.GIT_CREDENTIALS, usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
-                            sh "git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/seasoned-coder/demo-spring.git HEAD:${TARGET_BRANCH}"
-                        }
+                    // Push the snapshot commit
+                    withCredentials([usernamePassword(credentialsId: env.GIT_CREDENTIALS, usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
+                        sh "git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/seasoned-coder/demo-spring.git HEAD:${TARGET_BRANCH}"
                     }
                 }
             }
         }
         
-        // Stage 6: Deploy Artifacts (Optional, replace with your actual deployment logic)
+        // Stage 6: Deploy Artifacts
         stage('Deploy') {
-            when {
-                // Only run deploy if the previous Git push succeeded
-                expression { return true }
-            }
             steps {
                 script {
                     echo "Skipping formal deployment step. Artifacts are now in Git/Tagged."
-                    // If you need to deploy artifacts to Maven Central or Artifactory:
-                    /*
-                    withMaven(
-                        maven: 'Maven3.9.11',
-                        jdk: 'java-21-openjdk',
-                        options: [artifactsPublisher(id: 'your-server-id')] 
-                    ) {
-                        sh 'mvn -B -ntp deploy'
-                    }
-                    */
                 }
             }
         }
