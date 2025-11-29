@@ -3,6 +3,7 @@ pipeline {
     agent any
     environment {
         MAVEN_TOOL = 'Maven3.9.11'
+        JDK_TOOL   = 'jdk17' // <--- Required to ensure the correct Java is used for compilation
         GIT_CRED = 'GIT_RW'
     }
 
@@ -12,6 +13,12 @@ pipeline {
         disableConcurrentBuilds()
         timestamps()
         buildDiscarder(logRotator(numToKeepStr: '20', artifactNumToKeepStr: '10'))
+    }
+    
+    // Global tools declaration to make JDK available on the path
+    tools {
+        jdk env.JDK_TOOL
+        maven env.MAVEN_TOOL
     }
 
     stages {
@@ -124,24 +131,28 @@ fi
 echo "Parsing project version and applying increment"
 case "${INC_TYPE}" in
     MAJOR)
-        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=${parsedVersion.nextMajorVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "${WORKSPACE}/pom.xml"
+        # FIX APPLIED HERE: Added single quotes around the Maven property expression
+        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion='\${parsedVersion.nextMajorVersion}' -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
         ;;
     MINOR)
-        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=${parsedVersion.nextMinorVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "${WORKSPACE}/pom.xml"
+        # FIX APPLIED HERE: Added single quotes around the Maven property expression
+        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion='\${parsedVersion.nextMinorVersion}' -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
         ;;
     PATCH)
-        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=${parsedVersion.nextIncrementalVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "${WORKSPACE}/pom.xml"
+        # FIX APPLIED HERE: Added single quotes around the Maven property expression
+        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion='\${parsedVersion.nextIncrementalVersion}' -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
         ;;
     *)
         echo "Unknown INC_TYPE '${INC_TYPE}', defaulting to MINOR"
-        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=${parsedVersion.nextMinorVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "${WORKSPACE}/pom.xml"
+        # FIX APPLIED HERE: Added single quotes around the Maven property expression
+        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion='\${parsedVersion.nextMinorVersion}' -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
         ;;
 esac
 
 echo "Committing changes and stripping SNAPSHOT dependencies"
-mvn -B -ntp versions:commit -f "${WORKSPACE}/pom.xml"
-mvn -B -ntp versions:strip-snapshot-dependencies -DprocessAllModules=true -f "${WORKSPACE}/pom.xml" || true
-mvn -B -ntp versions:commit -f "${WORKSPACE}/pom.xml"
+mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
+mvn -B -ntp versions:strip-snapshot-dependencies -DprocessAllModules=true -f "\${WORKSPACE}/pom.xml" || true
+mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
                             '''
                         } else {
                             error('Windows agent not supported for POM update. Please run on a Unix agent or implement a Windows equivalent.')
@@ -232,7 +243,7 @@ endlocal
         stage('Final Status') {
             steps {
                 script {
-                    // Ensure configured maven tool is available for this final evaluation (prevents mvn not found)
+                    // Final status logic remains the same
                     def displayVersion = env.NEW_RELEASE ?: env.NEXT_RELEASE
                     if (!displayVersion) {
                         displayVersion = withMaven(maven: env.MAVEN_TOOL) {
