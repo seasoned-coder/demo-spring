@@ -12,7 +12,7 @@
 		<relativePath />
 	</parent>
 
-	<version>1</version>
+	<version>null object or invalid expression.0.0</version>
 	<groupId>kjp</groupId>
 	<artifactId>demo-parent</artifactId>
 	<packaging>pom</packaging>
