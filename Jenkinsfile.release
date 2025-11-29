@@ -30,6 +30,7 @@ pipeline {
         stage('Ask if POM needs updating') {
             steps {
                 script {
+                    // Timeout around the input is valid inside a script block
                     timeout(time: 1, unit: 'HOURS') {
                         input(
                             message: 'Approve to continue the release process?',
@@ -42,11 +43,11 @@ pipeline {
             }
         }
         
-        // Stage 2: Initial Git Checkout (Explicit and controlled - RUNS ONCE)
+        // Stage 2: Initial Git Checkout (Explicit and controlled)
         stage('Initial Checkout') {
             steps {
-                echo "Ensuring workspace has a checked-out repository (run once)..."
-                // Uses the SCM definition from the job configuration
+                echo "Ensuring workspace has a checked-out repository..."
+                // Use the built-in SCM definition for a single, correct checkout
                 checkout scm
                 
                 // Optional: Show directory contents to confirm checkout was successful
@@ -65,6 +66,7 @@ pipeline {
                         maven: 'Maven3.9.11',
                         jdk: 'java-21-openjdk'
                     ) {
+                        // The 'test' goal automatically builds all modules before running tests
                         sh 'mvn -B -ntp test'
                     }
                 }
@@ -78,6 +80,7 @@ pipeline {
                     echo "Computing candidate next versions (major, minor, patch) from pom"
                     def nextMajor, nextMinor, nextPatch
                     
+                    // Run all Maven commands within withMaven to manage the environment
                     withMaven(
                         maven: 'Maven3.9.11',
                         jdk: 'java-21-openjdk'
@@ -100,7 +103,7 @@ pipeline {
                     echo "Computed next-minor: ${nextMinor}"
                     echo "Computed next-patch: ${nextPatch}"
                     
-                    // We'll choose the patch version as the next release candidate
+                    // For this example, we'll choose the patch version as the next release candidate
                     NEXT_RELEASE = "${nextPatch}" 
                     echo "NEXT_RELEASE set to ${NEXT_RELEASE}"
                 }
@@ -109,7 +112,7 @@ pipeline {
 
         // Stage 5: Update POM and Commit/Tag
         stage('Update POM') {
-            // FIX: The 'timeout' directive MUST be wrapped in an 'options' block inside the stage.
+            // FIX: Declarative timeout MUST be in an 'options' block, not wrapping 'steps' directly.
             options {
                 timeout(time: 30, unit: 'MINUTES')
             }
@@ -122,7 +125,6 @@ pipeline {
                         maven: 'Maven3.9.11',
                         jdk: 'java-21-openjdk'
                     ) {
-                        // Apply the version change to all modules
                         sh "mvn -B -ntp versions:set -DnewVersion=${NEXT_RELEASE} -DprocessAllModules=true"
                         sh "mvn -B -ntp versions:set -DnewVersion=${NEXT_RELEASE} -DprocessAllModules=true -f hello-lib/pom.xml"
                         sh "mvn -B -ntp versions:set -DnewVersion=${NEXT_RELEASE} -DprocessAllModules=true -f app/pom.xml"
@@ -142,9 +144,9 @@ pipeline {
                     // Tag the commit
                     sh "git tag -a v${NEXT_RELEASE} -m 'Release v${NEXT_RELEASE}'"
                     
-                    // Push the commit and the tag (This is where the failure is expected if auth is wrong)
+                    // Push the commit and the tag
+                    // *** This is the most likely point of failure (Authentication) ***
                     withCredentials([usernamePassword(credentialsId: env.GIT_CREDENTIALS, usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
-                        // Push commit and tags in one go
                         sh "git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/seasoned-coder/demo-spring.git HEAD:${TARGET_BRANCH} --tags"
                     }
                     
@@ -172,11 +174,25 @@ pipeline {
             }
         }
         
-        // Stage 6: Deploy Artifacts
+        // Stage 6: Deploy Artifacts (Optional, replace with your actual deployment logic)
         stage('Deploy') {
+            when {
+                // Only run deploy if the previous Git push succeeded
+                expression { return true }
+            }
             steps {
                 script {
                     echo "Skipping formal deployment step. Artifacts are now in Git/Tagged."
+                    // If you need to deploy artifacts to Maven Central or Artifactory:
+                    /*
+                    withMaven(
+                        maven: 'Maven3.9.11',
+                        jdk: 'java-21-openjdk',
+                        options: [artifactsPublisher(id: 'your-server-id')] 
+                    ) {
+                        sh 'mvn -B -ntp deploy'
+                    }
+                    */
                 }
             }
         }
