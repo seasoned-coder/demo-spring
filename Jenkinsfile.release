@@ -133,6 +133,7 @@ mvn -B -ntp build-helper:parse-version -f "\${WORKSPACE}/pom.xml"
 # 2. Get the RAW next version component based on INC_TYPE
 case "\${INC_TYPE}" in
     MAJOR)
+        # We need the last non-empty line of output, as previous lines can be noise from other goals/modules
         RAW_OUTPUT=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
         ;;
     MINOR)
@@ -147,10 +148,11 @@ case "\${INC_TYPE}" in
         ;;
 esac
 
-# 2.5. FILTER: Strip known Maven error messages from the output if they were captured to stdout.
-# We keep the first line only, and filter out the known error string.
-RAW_NEXT_VERSION=$(echo "\${RAW_OUTPUT}" | head -n 1 | grep -v 'null object or invalid expression' || echo "")
+# 2.5. FILTER: Extract the last non-empty line of the output, which should be the version component.
+# This handles the multi-module noise that was causing RAW_NEXT_VERSION to be empty or incorrect.
+RAW_NEXT_VERSION=$(echo "\${RAW_OUTPUT}" | awk 'NF' | tail -1 || echo "")
 
+echo "Raw version component extracted: \${RAW_NEXT_VERSION}"
 
 # 2.7. Revert temporary SNAPSHOT change if it was added
 if [ "\${NEEDS_REVERT}" -eq 1 ]; then
@@ -168,10 +170,29 @@ if [[ "\${RAW_NEXT_VERSION}" != *.* ]]; then
         echo "WARNING: Version calculation failed, defaulting to 1.0.0." >&2
         NEW_RELEASE_VERSION="1.0.0"
     else
-        NEW_RELEASE_VERSION="\${RAW_NEXT_VERSION}.0.0"
+        # To calculate MINOR/PATCH correctly, we need to fetch the major and minor parts separately if not MAJOR
+        # Since we are only getting the single component (e.g. '1' for next Minor), we must ensure 
+        # the appropriate 'X.Y.Z' format is applied.
+        if [ "\${INC_TYPE}" = "MINOR" ]; then
+             # Recalculate full version parts for MINOR and PATCH updates
+             CURRENT_MAJOR=$(mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.majorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null | awk 'NF' | tail -1 || echo "0")
+             CURRENT_MINOR_INCREMENT="\${RAW_NEXT_VERSION}"
+             NEW_RELEASE_VERSION="\${CURRENT_MAJOR}.\${CURRENT_MINOR_INCREMENT}.0"
+
+        elif [ "\${INC_TYPE}" = "PATCH" ]; then
+             CURRENT_MAJOR=$(mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.majorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null | awk 'NF' | tail -1 || echo "0")
+             CURRENT_MINOR=$(mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.minorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null | awk 'NF' | tail -1 || echo "0")
+             CURRENT_PATCH_INCREMENT="\${RAW_NEXT_VERSION}"
+             NEW_RELEASE_VERSION="\${CURRENT_MAJOR}.\${CURRENT_MINOR}.\${CURRENT_PATCH_INCREMENT}"
+
+        else # Must be MAJOR
+            NEW_RELEASE_VERSION="\${RAW_NEXT_VERSION}.0.0"
+        fi
+
     fi
 else
-    # Otherwise, the version calculation returned a full semantic version, just remove the -SNAPSHOT qualifier if present.
+    # This block is for if RAW_NEXT_VERSION contains a dot (which it shouldn't if we extract a single component)
+    # If it happens, we ensure no -SNAPSHOT remains.
     NEW_RELEASE_VERSION="\$(echo "\${RAW_NEXT_VERSION}" | sed 's/-SNAPSHOT$//')"
 fi
 
@@ -201,6 +222,7 @@ git config user.name "Jenkins"
 git config user.email "jenkins@example.com"
 
 # 1. Get the new version that was just applied to the POM (clean, non-SNAPSHOT version)
+# We ensure we get the correct version from the parent pom.xml by using the local workspace file path
 NEW_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f "\${WORKSPACE}/pom.xml" 2>/dev/null | sed 's/-SNAPSHOT$//' || echo "1.0.0")
 NEW_RELEASE_BRANCH="release-\${NEW_VERSION}"
 
@@ -215,6 +237,12 @@ else
     # 3. Create a new local branch pointing to the new commit (HEAD)
     echo "Creating new local branch: \${NEW_RELEASE_BRANCH} pointing to HEAD"
     git branch "\${NEW_RELEASE_BRANCH}" HEAD
+
+    # 4. Define the timestamped tag
+    TIMESTAMP=$(date +%Y%m%d%H%M%S)
+    RELEASE_TAG="\${NEW_VERSION}-\${TIMESTAMP}"
+    echo "Creating tag: \${RELEASE_TAG}"
+    git tag -a "\${RELEASE_TAG}" -m "Release tag \${RELEASE_TAG}" HEAD
 fi
 
 if [ "\${PUSH_CHANGES}" = "true" ]; then
@@ -235,10 +263,12 @@ EOF
     chmod +x "$GIT_ASKPASS_SCRIPT"
     export GIT_ASKPASS="$GIT_ASKPASS_SCRIPT"
 
-    echo "PUSH_CHANGES=${PUSH_CHANGES}. Pushing new branch \${NEW_RELEASE_BRANCH} to origin..."
-    # 4. Push the new local branch to the remote, creating it there.
-    # Source and Destination are both the new branch name.
+    echo "PUSH_CHANGES=${PUSH_CHANGES}. Pushing new branch \${NEW_RELEASE_BRANCH} and tag \${RELEASE_TAG} to origin..."
+    # Push the new local branch to the remote, creating it there.
     git push origin "\${NEW_RELEASE_BRANCH}"
+    
+    # Push the newly created tag
+    git push origin "\${RELEASE_TAG}"
 
     unset GIT_ASKPASS
     rm -f "$GIT_ASKPASS_SCRIPT"
