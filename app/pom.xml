@@ -8,7 +8,7 @@
     <parent>
         <groupId>kjp</groupId>
         <artifactId>demo-parent</artifactId>
-        <version>0.0.1</version>
+        <version>null object or invalid expression.0.0</version>
     </parent>
 
     <artifactId>app</artifactId>
