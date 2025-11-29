@@ -3,7 +3,7 @@ pipeline {
     agent any
     environment {
         MAVEN_TOOL = 'Maven3.9.11'
-        JDK_TOOL   = 'jdk17' // <--- Required to ensure the correct Java is used for compilation
+        JDK_TOOL   = 'jdk21'   // <-- RESTORED TO JDK21
         GIT_CRED = 'GIT_RW'
     }
 
@@ -131,20 +131,20 @@ fi
 echo "Parsing project version and applying increment"
 case "${INC_TYPE}" in
     MAJOR)
-        # FIX APPLIED HERE: Added single quotes around the Maven property expression
+        # FIX: The Maven property is now correctly escaped with single quotes to prevent shell interpretation.
         mvn -B -ntp build-helper:parse-version versions:set -DnewVersion='\${parsedVersion.nextMajorVersion}' -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
         ;;
     MINOR)
-        # FIX APPLIED HERE: Added single quotes around the Maven property expression
+        # FIX: The Maven property is now correctly escaped with single quotes to prevent shell interpretation.
         mvn -B -ntp build-helper:parse-version versions:set -DnewVersion='\${parsedVersion.nextMinorVersion}' -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
         ;;
     PATCH)
-        # FIX APPLIED HERE: Added single quotes around the Maven property expression
+        # FIX: The Maven property is now correctly escaped with single quotes to prevent shell interpretation.
         mvn -B -ntp build-helper:parse-version versions:set -DnewVersion='\${parsedVersion.nextIncrementalVersion}' -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
         ;;
     *)
         echo "Unknown INC_TYPE '${INC_TYPE}', defaulting to MINOR"
-        # FIX APPLIED HERE: Added single quotes around the Maven property expression
+        # FIX: The Maven property is now correctly escaped with single quotes to prevent shell interpretation.
         mvn -B -ntp build-helper:parse-version versions:set -DnewVersion='\${parsedVersion.nextMinorVersion}' -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
         ;;
 esac
