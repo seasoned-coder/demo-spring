@@ -4,6 +4,8 @@ pipeline {
     environment {
         MAVEN_TOOL = 'Maven3.9.11'
         GIT_CRED = 'GIT_RW'
+        // Added placeholder for the final, full version string assembled in Groovy
+        FULL_NEW_VERSION = '' 
     }
 
     options {
@@ -73,23 +75,42 @@ pipeline {
                 script {
                     echo 'Computing candidate next versions (major, minor, patch) from pom'
                     withMaven(maven: env.MAVEN_TOOL) {
-                            // These Groovy calls must include build-helper:parse-version to expose the properties
-                            def nextMajor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
-                            def nextMinor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
-                            def nextPatch = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextIncrementalVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
+                        // Get all version components (current and next)
+                        // Note: Using explicit error suppression and fallback '|| echo "0"' to handle verbose/empty output gracefully
+                        def currentMajor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.majorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"0\"", returnStdout: true).trim()
+                        def currentMinor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.minorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"0\"", returnStdout: true).trim()
+                        
+                        def nextMajorComponent = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"1\"", returnStdout: true).trim()
+                        def nextMinorComponent = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"0\"", returnStdout: true).trim()
+                        def nextPatchComponent = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextIncrementalVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"0\"", returnStdout: true).trim()
 
-                            if (nextMinor) {
-                                env.NEXT_RELEASE = nextMinor
-                            } else if (nextPatch) {
-                                env.NEXT_RELEASE = nextPatch
-                            } else if (nextMajor) {
-                                env.NEXT_RELEASE = nextMajor
-                            }
+                        // 1. Assemble the full version string based on the user's INC_TYPE (NEW LOGIC)
+                        def newVersionToApply = ''
+                        def nextReleaseComponent = nextMinorComponent
 
-                            echo "Computed next-major: ${nextMajor}"
-                            echo "Computed next-minor: ${nextMinor}"
-                            echo "Computed next-patch: ${nextPatch}"
-                            echo "NEXT_RELEASE set to ${env.NEXT_RELEASE}"
+                        if (env.INC_TYPE == 'MAJOR') {
+                            newVersionToApply = "${nextMajorComponent}.0.0"
+                            nextReleaseComponent = nextMajorComponent
+                        } else if (env.INC_TYPE == 'MINOR') {
+                            newVersionToApply = "${currentMajor}.${nextMinorComponent}.0"
+                            nextReleaseComponent = nextMinorComponent
+                        } else if (env.INC_TYPE == 'PATCH') {
+                            newVersionToApply = "${currentMajor}.${currentMinor}.${nextPatchComponent}"
+                            nextReleaseComponent = nextPatchComponent
+                        } else {
+                            // If INC_TYPE is null (i.e., SKIP_POM_UPDATE was true), use a placeholder/current version for logs
+                            newVersionToApply = "N/A"
+                        }
+
+                        // Set the full version and the component version in the environment
+                        env.FULL_NEW_VERSION = newVersionToApply
+                        env.NEXT_RELEASE = nextReleaseComponent // Keeping this for backward compatibility with user's original logic
+
+                        echo "Computed next-major: ${nextMajorComponent}"
+                        echo "Computed next-minor: ${nextMinorComponent}"
+                        echo "Computed next-patch: ${nextPatchComponent}"
+                        echo "NEXT_RELEASE (component) set to ${env.NEXT_RELEASE}"
+                        echo "FULL_NEW_VERSION (assembled) set to ${env.FULL_NEW_VERSION}" // NEW LOG
                     }
                 }
             }
@@ -104,10 +125,15 @@ pipeline {
                     if (!env.INC_TYPE) {
                             error("INC_TYPE must be provided when you answered NO to the POM update question")
                     }
+                    if (env.FULL_NEW_VERSION == 'N/A' || !env.FULL_NEW_VERSION) {
+                            error("Failed to compute FULL_NEW_VERSION based on INC_TYPE: ${env.INC_TYPE}")
+                    }
 
-                    echo "Updating POM based on increment type ${env.INC_TYPE}..."
+                    echo "Updating POM to version ${env.FULL_NEW_VERSION} based on increment type ${env.INC_TYPE}..."
 
                     withMaven(maven: env.MAVEN_TOOL, publisherStrategy: 'EXPLICIT') {
+                        // We use the FULL_NEW_VERSION calculated reliably in Groovy, 
+                        // eliminating the fragile shell script version calculation logic.
                         sh '''#!/bin/bash
 set -euo pipefail
 
@@ -116,93 +142,8 @@ if [ ! -f pom.xml ]; then
     exit 1
 fi
 
-echo "Parsing project version and calculating next semantic version"
-
-# Get current version for comparison
-CURRENT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
-NEEDS_REVERT=0
-
-# If the version does not end in -SNAPSHOT (e.g., 1.0.0), temporarily append it 
-# so build-helper can correctly calculate the next release number (1.0.1, 1.1.0, 2.0.0).
-if [[ "\${CURRENT_VERSION}" != *"-SNAPSHOT" ]]; then
-    NEEDS_REVERT=1
-    echo "Current version '\${CURRENT_VERSION}' does not end in -SNAPSHOT. Temporarily setting to SNAPSHOT for calculation."
-    # Temporarily set to SNAPSHOT without committing or backup
-    mvn -B -ntp versions:set -DnewVersion="\${CURRENT_VERSION}-SNAPSHOT" -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
-fi
-
-# 1. Ensure build-helper:parse-version runs to populate properties on the (possibly) SNAPSHOT-suffixed POM
-mvn -B -ntp build-helper:parse-version -f "\${WORKSPACE}/pom.xml"
-
-# 2. Get the RAW next version component based on INC_TYPE
-case "\${INC_TYPE}" in
-    MAJOR)
-        # RAW_OUTPUT contains the Maven output, which might include noise/errors
-        RAW_OUTPUT=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
-        ;;
-    MINOR)
-        RAW_OUTPUT=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
-        ;;
-    PATCH)
-        RAW_OUTPUT=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextIncrementalVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
-        ;;
-    *)
-        echo "Unknown INC_TYPE '\${INC_TYPE}', defaulting to MINOR"
-        RAW_OUTPUT=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
-        ;;
-esac
-
-# 2.5. ROBUST FILTERING: Extract the last line containing only digits, and strip all surrounding whitespace.
-RAW_NEXT_VERSION=$(echo "\${RAW_OUTPUT}" | grep -E '^[0-9]+$' | tail -1 | tr -d '[:space:]' || echo "")
-
-echo "Raw version component extracted: '\${RAW_NEXT_VERSION}'" # Use quotes to inspect for hidden whitespace/chars
-
-# 2.7. Revert temporary SNAPSHOT change if it was added
-if [ "\${NEEDS_REVERT}" -eq 1 ]; then
-    echo "Reverting temporary -SNAPSHOT suffix to original version: \${CURRENT_VERSION}"
-    mvn -B -ntp versions:revert -f "\${WORKSPACE}/pom.xml" || true
-fi
-
-
-# 3. Sanitize the RAW version to ensure X.Y.Z semantic format
-# If the version does not contain a dot (e.g., '1'), append '.0.0'.
-if [[ "\${RAW_NEXT_VERSION}" != *.* ]]; then
-    # If calculation failed (empty string), it defaults to '1.0.0' as a final safeguard.
-    if [ -z "\${RAW_NEXT_VERSION}" ]; then
-        echo "WARNING: Version calculation failed, defaulting to 1.0.0." >&2
-        NEW_RELEASE_VERSION="1.0.0"
-    else
-        # To calculate MINOR/PATCH correctly, we need to fetch the major and minor parts separately 
-        # (using the same robust filtering method)
-        
-        # Helper function to get clean numeric component
-        get_clean_component() {
-            local expression="$1"
-            # Get output, filter for lines with only digits, take the last one, and trim whitespace
-            mvn -B -ntp help:evaluate -Dexpression="\${expression}" -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null | grep -E '^[0-9]+$' | tail -1 | tr -d '[:space:]' || echo "0"
-        }
-
-        if [ "\${INC_TYPE}" = "MINOR" ]; then
-             CURRENT_MAJOR=$(get_clean_component "parsedVersion.majorVersion")
-             CURRENT_MINOR_INCREMENT="\${RAW_NEXT_VERSION}"
-             NEW_RELEASE_VERSION="\${CURRENT_MAJOR}.\${CURRENT_MINOR_INCREMENT}.0"
-
-        elif [ "\${INC_TYPE}" = "PATCH" ]; then
-             CURRENT_MAJOR=$(get_clean_component "parsedVersion.majorVersion")
-             CURRENT_MINOR=$(get_clean_component "parsedVersion.minorVersion")
-             CURRENT_PATCH_INCREMENT="\${RAW_NEXT_VERSION}"
-             NEW_RELEASE_VERSION="\${CURRENT_MAJOR}.\${CURRENT_MINOR}.\${CURRENT_PATCH_INCREMENT}"
-
-        else # Must be MAJOR
-            NEW_RELEASE_VERSION="\${RAW_NEXT_VERSION}.0.0"
-        fi
-
-    fi
-else
-    # This block is for if RAW_NEXT_VERSION contains a dot (which it shouldn't if we extract a single component)
-    # If it happens, we ensure no -SNAPSHOT remains.
-    NEW_RELEASE_VERSION="\$(echo "\${RAW_NEXT_VERSION}" | sed 's/-SNAPSHOT$//')"
-fi
+# Use the pre-calculated Groovy variable directly!
+NEW_RELEASE_VERSION="${FULL_NEW_VERSION}"
 
 echo "Setting new semantic release version: \${NEW_RELEASE_VERSION}"
 
@@ -231,6 +172,7 @@ git config user.email "jenkins@example.com"
 
 # 1. Get the new version that was just applied to the POM (clean, non-SNAPSHOT version)
 # We ensure we get the correct version from the parent pom.xml by using the local workspace file path
+# We must re-evaluate here as the last set command might have been in Groovy (which doesn't affect the shell)
 NEW_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f "\${WORKSPACE}/pom.xml" 2>/dev/null | sed 's/-SNAPSHOT$//' || echo "1.0.0")
 NEW_RELEASE_BRANCH="release-\${NEW_VERSION}"
 
