@@ -4,8 +4,6 @@ pipeline {
     environment {
         MAVEN_TOOL = 'Maven3.9.11'
         GIT_CRED = 'GIT_RW'
-        // Added placeholder for the final, full version string assembled in Groovy
-        FULL_NEW_VERSION = '' 
     }
 
     options {
@@ -66,79 +64,15 @@ pipeline {
             }
         }
 
+        // Simplified: Just checking tools work here. Calculation moved to Update POM for atomic execution.
         stage('Compute Next Version') {
             agent any
             steps {
                 script {
-                    echo 'Computing candidate next versions (major, minor, patch) from pom'
-                    
-                    // Define Groovy variables to hold the extracted version components
-                    def currentMajor
-                    def currentMinor
-                    def nextMajorComponent
-                    def nextMinorComponent
-                    def nextPatchComponent
-                    
+                    echo 'Preparing to compute next version in Update stage...'
                     withMaven(maven: env.MAVEN_TOOL) {
-                        // Capture the output of each mvn command directly into a local Groovy variable
-                        currentMajor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.majorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"0\"", returnStdout: true).trim()
-                        currentMinor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.minorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"0\"", returnStdout: true).trim()
-                        
-                        nextMajorComponent = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"1\"", returnStdout: true).trim()
-                        nextMinorComponent = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"0\"", returnStdout: true).trim()
-                        nextPatchComponent = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextIncrementalVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"0\"", returnStdout: true).trim()
+                         sh "mvn -B -ntp -v"
                     }
-
-                    // Log the components for debugging
-                    echo "Current Major: ${currentMajor}"
-                    echo "Current Minor: ${currentMinor}"
-                    echo "Next Major Component: ${nextMajorComponent}"
-                    echo "Next Minor Component: ${nextMinorComponent}"
-                    echo "Next Patch Component: ${nextPatchComponent}"
-                    
-                    // 1. Assemble the full version string based on the user's INC_TYPE
-                    def newVersionToApply = null
-                    def nextReleaseComponent = null
-                    
-                    // Use a locally trimmed variable and safer .equals() comparison
-                    def incType = env.INC_TYPE?.trim()
-                    echo "INC_TYPE received for comparison: '${incType}'"
-
-                    // Use explicit concatenation and defensive defaults to guarantee a string result.
-                    if ('MAJOR'.equals(incType)) {
-                        def major = nextMajorComponent ?: '1'
-                        newVersionToApply = major + '.0.0'
-                        nextReleaseComponent = major
-                    } else if ('MINOR'.equals(incType)) {
-                        def major = currentMajor ?: '0'
-                        def minor = nextMinorComponent ?: '1'
-                        // CRITICAL FIX: Use simple string concatenation (+) to avoid Groovy GString coercion issues
-                        newVersionToApply = major + '.' + minor + '.0'
-                        nextReleaseComponent = minor
-                    } else if ('PATCH'.equals(incType)) {
-                        def major = currentMajor ?: '0'
-                        def minor = currentMinor ?: '0'
-                        def patch = nextPatchComponent ?: '1'
-                        // CRITICAL FIX: Use simple string concatenation (+) to avoid Groovy GString coercion issues
-                        newVersionToApply = major + '.' + minor + '.' + patch
-                        nextReleaseComponent = patch
-                    } else {
-                        // If INC_TYPE is null/empty, this is the intended path (SKIP_POM_UPDATE was true)
-                        newVersionToApply = "N/A"
-                        nextReleaseComponent = "N/A"
-                    }
-
-                    // Set the environment variables
-                    env.FULL_NEW_VERSION = newVersionToApply
-                    env.NEXT_RELEASE = nextReleaseComponent // Component version for logging
-
-                    // Check for null assignment and ensure the value is good
-                    if (env.SKIP_POM_UPDATE == 'false' && (env.FULL_NEW_VERSION == 'N/A' || !env.FULL_NEW_VERSION)) {
-                        error("FATAL ERROR: Failed to reliably assemble the FULL_NEW_VERSION for increment type: ${env.INC_TYPE}. Result was: ${env.FULL_NEW_VERSION}")
-                    }
-
-                    echo "NEXT_RELEASE (component) set to ${env.NEXT_RELEASE}"
-                    echo "FULL_NEW_VERSION (assembled) set to ${env.FULL_NEW_VERSION}"
                 }
             }
         }
@@ -152,14 +86,11 @@ pipeline {
                     if (!env.INC_TYPE) {
                             error("INC_TYPE must be provided when you answered NO to the POM update question")
                     }
-                    if (env.FULL_NEW_VERSION == 'N/A' || !env.FULL_NEW_VERSION) {
-                            error("Failed to compute FULL_NEW_VERSION based on INC_TYPE: ${env.INC_TYPE}")
-                    }
 
-                    echo "Updating POM to version ${env.FULL_NEW_VERSION} based on increment type ${env.INC_TYPE}..."
+                    echo "Updating POM based on increment type ${env.INC_TYPE}..."
 
                     withMaven(maven: env.MAVEN_TOOL, publisherStrategy: 'EXPLICIT') {
-                        // Shell script uses the Groovy environment variable FULL_NEW_VERSION
+                        // SIMPLE BASH SCRIPT: Get numbers, do math, set version. No Groovy interpolation.
                         sh '''#!/bin/bash
 set -euo pipefail
 
@@ -168,21 +99,57 @@ if [ ! -f pom.xml ]; then
     exit 1
 fi
 
-NEW_RELEASE_VERSION="${FULL_NEW_VERSION}"
+# 1. Removed standalone parse-version because properties are not persistent across mvn invocations.
+# Instead, we run parse-version AND help:evaluate in the same command below.
 
-echo "Setting new semantic release version: \${NEW_RELEASE_VERSION}"
+# 2. Helper to get a clean number (handles noise)
+# KEY CHANGE: We now run build-helper:parse-version BEFORE help:evaluate in the SAME command.
+get_ver() {
+    mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.$1 -DforceStdout -q -f "${WORKSPACE}/pom.xml" 2>/dev/null | grep -E '^[0-9]+$' | tail -1
+}
 
-# 1. Apply the fully qualified, non-SNAPSHOT version
-mvn -B -ntp versions:set -DnewVersion="\${NEW_RELEASE_VERSION}" -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+# 3. Extract current components
+MAJOR=$(get_ver majorVersion)
+MINOR=$(get_ver minorVersion)
+PATCH=$(get_ver incrementalVersion)
+
+# Default to 0 if empty
+MAJOR=${MAJOR:-0}
+MINOR=${MINOR:-0}
+PATCH=${PATCH:-0}
+
+echo "Current Version detected as: ${MAJOR}.${MINOR}.${PATCH}"
+echo "Increment type is: ${INC_TYPE}"
+
+# 4. Calculate New Version string using Bash math
+if [ "${INC_TYPE}" == "MAJOR" ]; then
+    NEW_MAJOR=$((MAJOR + 1))
+    NEW_VER="${NEW_MAJOR}.0.0"
+elif [ "${INC_TYPE}" == "MINOR" ]; then
+    NEW_MINOR=$((MINOR + 1))
+    NEW_VER="${MAJOR}.${NEW_MINOR}.0"
+else
+    # Default to PATCH
+    NEW_PATCH=$((PATCH + 1))
+    NEW_VER="${MAJOR}.${MINOR}.${NEW_PATCH}"
+fi
+
+echo "Calculated NEW_VER: ${NEW_VER}"
+
+# 5. Apply the version
+mvn -B -ntp versions:set -DnewVersion="${NEW_VER}" -DprocessAllModules=true -DgenerateBackupPoms=false -f "${WORKSPACE}/pom.xml"
 
 echo "Committing project version change"
-mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
+mvn -B -ntp versions:commit -f "${WORKSPACE}/pom.xml"
 
 echo "Updating SNAPSHOT dependencies to latest release"
-mvn -B -ntp versions:use-releases -DprocessAllModules=true -DallowSnapshots=false -f "\${WORKSPACE}/pom.xml" || true
+mvn -B -ntp versions:use-releases -DprocessAllModules=true -DallowSnapshots=false -f "${WORKSPACE}/pom.xml" || true
 
 echo "Committing dependency updates"
-mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
+mvn -B -ntp versions:commit -f "${WORKSPACE}/pom.xml"
+
+# Export for next step
+echo "${NEW_VER}" > new_version.txt
                             '''
                     }
 
@@ -195,30 +162,35 @@ set -euo pipefail
 git config user.name "Jenkins"
 git config user.email "jenkins@example.com"
 
-# Re-evaluate the version from the updated POM to ensure accuracy
-NEW_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f "\${WORKSPACE}/pom.xml" 2>/dev/null | sed 's/-SNAPSHOT$//' || echo "1.0.0")
-NEW_RELEASE_BRANCH="release-\${NEW_VERSION}"
+if [ -f new_version.txt ]; then
+    NEW_VERSION=$(cat new_version.txt)
+else
+    echo "ERROR: new_version.txt not found. Version calculation failed."
+    exit 1
+fi
 
-# Commit the changes (happens on detached HEAD)
+NEW_RELEASE_BRANCH="release-${NEW_VERSION}"
+
+# 2. Commit the changes (happens on detached HEAD)
 git add -A
 if git diff --staged --quiet; then
     echo "No pom changes to commit"
 else
     # Use the cleaned version for the commit message
-    git commit -m "[maven-release] Set release version to \${NEW_VERSION}" || true
+    git commit -m "[maven-release] Set release version to ${NEW_VERSION}" || true
     
-    # Create a new local branch pointing to the new commit (HEAD)
-    echo "Creating new local branch: \${NEW_RELEASE_BRANCH} pointing to HEAD"
-    git branch "\${NEW_RELEASE_BRANCH}" HEAD
+    # 3. Create a new local branch pointing to the new commit (HEAD)
+    echo "Creating new local branch: ${NEW_RELEASE_BRANCH} pointing to HEAD"
+    git branch "${NEW_RELEASE_BRANCH}" HEAD
 
-    # Define the timestamped tag
+    # 4. Define the timestamped tag
     TIMESTAMP=$(date +%Y%m%d%H%M%S)
-    RELEASE_TAG="\${NEW_VERSION}-\${TIMESTAMP}"
-    echo "Creating tag: \${RELEASE_TAG}"
-    git tag -a "\${RELEASE_TAG}" -m "Release tag \${RELEASE_TAG}" HEAD
+    RELEASE_TAG="${NEW_VERSION}-${TIMESTAMP}"
+    echo "Creating tag: ${RELEASE_TAG}"
+    git tag -a "${RELEASE_TAG}" -m "Release tag ${RELEASE_TAG}" HEAD
 fi
 
-if [ "\${PUSH_CHANGES}" = "true" ]; then
+if [ "${PUSH_CHANGES}" = "true" ]; then
     ORIGIN_URL=$(git remote get-url origin || echo "")
     if [ -z "$ORIGIN_URL" ]; then
         echo "ERROR: no origin remote defined; cannot push" >&2
@@ -226,7 +198,7 @@ if [ "\${PUSH_CHANGES}" = "true" ]; then
     fi
 
     # Inject credentials into the URL for push
-    AUTH_URL_WITH_USER=$(echo "$ORIGIN_URL" | sed -E "s#https://(.*)#https://\${GIT_USER}@\\1#")
+    AUTH_URL_WITH_USER=$(echo "$ORIGIN_URL" | sed -E "s#https://(.*)#https://${GIT_USER}@\\1#")
     git remote set-url origin "$AUTH_URL_WITH_USER"
 
     GIT_ASKPASS_SCRIPT=/tmp/git-askpass-$$.sh
@@ -237,9 +209,9 @@ EOF
     chmod +x "$GIT_ASKPASS_SCRIPT"
     export GIT_ASKPASS="$GIT_ASKPASS_SCRIPT"
 
-    echo "PUSH_CHANGES=${PUSH_CHANGES}. Pushing new branch \${NEW_RELEASE_BRANCH} and tag \${RELEASE_TAG} to origin..."
-    git push origin "\${NEW_RELEASE_BRANCH}"
-    git push origin "\${RELEASE_TAG}"
+    echo "PUSH_CHANGES=${PUSH_CHANGES}. Pushing new branch ${NEW_RELEASE_BRANCH} and tag ${RELEASE_TAG} to origin..."
+    git push origin "${NEW_RELEASE_BRANCH}"
+    git push origin "${RELEASE_TAG}"
 
     unset GIT_ASKPASS
     rm -f "$GIT_ASKPASS_SCRIPT"
@@ -247,13 +219,6 @@ EOF
 fi
                             '''
                     }
-
-                    // Capture computed new release version from POM and export to env for later stages
-                    def computed = sh(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
-                    if (computed?.endsWith('-SNAPSHOT')) {
-                            computed = computed.replaceAll('-SNAPSHOT$', '')
-                    }
-                    env.NEW_RELEASE = computed
                 }
             }
         }
@@ -261,17 +226,7 @@ fi
         stage('Final Status') {
             steps {
                 script {
-                    def displayVersion = env.NEW_RELEASE ?: env.FULL_NEW_VERSION ?: env.NEXT_RELEASE
-
-                    if (!displayVersion || displayVersion == 'N/A') {
-                        displayVersion = withMaven(maven: env.MAVEN_TOOL) {
-                            sh(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"UNKNOWN\"", returnStdout: true).trim()
-                        }
-                    }
-                    if (displayVersion?.endsWith('-SNAPSHOT')) {
-                    displayVersion = displayVersion.replaceAll('-SNAPSHOT$', '')
-                    }
-                    echo "Pipeline finished. SKIP_POM_UPDATE=${env.SKIP_POM_UPDATE} INC_TYPE=${env.INC_TYPE} FINAL_VERSION=${displayVersion} PUSH_CHANGES=${env.PUSH_CHANGES}"
+                    echo "Pipeline finished."
                 }
             }
         }
