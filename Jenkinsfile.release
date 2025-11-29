@@ -99,15 +99,19 @@ pipeline {
                     // 1. Assemble the full version string based on the user's INC_TYPE
                     def newVersionToApply = null
                     def nextReleaseComponent = null
+                    
+                    // Use a locally trimmed variable and safer .equals() comparison
+                    def incType = env.INC_TYPE?.trim()
+                    echo "INC_TYPE received for comparison: '${incType}'" // Added this log for next run verification
 
-                    if (env.INC_TYPE == 'MAJOR') {
+                    if ('MAJOR'.equals(incType)) {
                         newVersionToApply = "${nextMajorComponent}.0.0"
                         nextReleaseComponent = nextMajorComponent
-                    } else if (env.INC_TYPE == 'MINOR') {
+                    } else if ('MINOR'.equals(incType)) {
                         // FIX: Use the correctly captured local variables here
                         newVersionToApply = "${currentMajor}.${nextMinorComponent}.0"
                         nextReleaseComponent = nextMinorComponent
-                    } else if (env.INC_TYPE == 'PATCH') {
+                    } else if ('PATCH'.equals(incType)) {
                         // FIX: Use the correctly captured local variables here
                         newVersionToApply = "${currentMajor}.${currentMinor}.${nextPatchComponent}"
                         nextReleaseComponent = nextPatchComponent
