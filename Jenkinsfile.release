@@ -152,6 +152,9 @@ esac
 # This handles the multi-module noise that was causing RAW_NEXT_VERSION to be empty or incorrect.
 RAW_NEXT_VERSION=$(echo "\${RAW_OUTPUT}" | awk 'NF' | tail -1 || echo "")
 
+# 2.6. FINAL FILTER: Explicitly filter the known Maven error message if it was captured as the version
+RAW_NEXT_VERSION=$(echo "\${RAW_NEXT_VERSION}" | grep -v 'null object or invalid expression' || echo "")
+
 echo "Raw version component extracted: \${RAW_NEXT_VERSION}"
 
 # 2.7. Revert temporary SNAPSHOT change if it was added
