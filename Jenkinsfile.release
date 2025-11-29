@@ -1,0 +1,170 @@
+/* groovylint-disable DuplicateMapLiteral, LineLength */
+pipeline {
+    agent any
+    environment {
+        MAVEN_TOOL = 'Maven3.9.11'
+        GIT_CRED = 'GIT_RW'
+    }
+
+    options {
+        ansiColor('xterm')
+        timeout(time: 1, unit: 'HOURS')
+        disableConcurrentBuilds()
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '20', artifactNumToKeepStr: '10'))
+        skipDefaultCheckout()
+    }
+
+    stages {
+    stage('Ask if POM needs updating') {
+        agent none
+        options { timeout(time: 1, unit: 'HOURS') }
+        steps {
+        script {
+            // multi-parameter input; returns a Map
+            def inputResult = input(
+            id: 'pomUpdate',
+            message: 'Has the POM for this project been updated with the new release version?',
+            ok: 'Submit',
+            parameters: [
+                booleanParam(name: 'PROCEED', defaultValue: true, description: 'Yes → skip POM update; No → update POM'),
+                choice(name: 'INC_TYPE', choices: ['MAJOR', 'MINOR', 'PATCH'].join('\n'), description: 'Select the version increment type to apply when updating the POM'),
+                booleanParam(name: 'PUSH_CHANGES', defaultValue: false, description: 'If true, commit and push POM changes back to origin')
+            ]
+            )
+
+            env.PROCEED = inputResult.PROCEED.toString()
+            env.INC_TYPE = inputResult.INC_TYPE?.trim()
+            env.PUSH_CHANGES = inputResult.PUSH_CHANGES.toString()
+        }
+        }
+    }
+
+    stage('Pre-checks and Build') {
+        when { expression { env.PROCEED == 'true' } }
+        steps {
+        echo 'Running pre-checks and build...'
+        // put build commands here
+        }
+    }
+
+        stage('Update POM') {
+                agent any
+                when { expression { env.PROCEED == 'false' } }
+                options { timeout(time: 30, unit: 'MINUTES') }
+                steps {
+                        script {
+                                if (!env.INC_TYPE) {
+                                        error("INC_TYPE must be provided when you answered NO to the POM update question")
+                                }
+
+                                echo "Updating POM based on increment type ${env.INC_TYPE}..."
+
+                                withMaven(maven: env.MAVEN_TOOL, publisherStrategy: 'EXPLICIT') {
+                                        sh '''#!/bin/bash
+set -euo pipefail
+
+if [ ! -f pom.xml ]; then
+    echo "ERROR: pom.xml not found in workspace"
+    exit 1
+fi
+
+echo "Parsing project version and applying increment"
+case "\${INC_TYPE}" in
+    MAJOR)
+        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=\${parsedVersion.nextMajorVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+        ;;
+    MINOR)
+        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=\${parsedVersion.nextMinorVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+        ;;
+    PATCH)
+        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=\${parsedVersion.nextIncrementalVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+        ;;
+    *)
+        echo "Unknown INC_TYPE '\${INC_TYPE}', defaulting to MINOR"
+        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=\${parsedVersion.nextMinorVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+        ;;
+esac
+
+echo "Committing changes and stripping SNAPSHOT dependencies"
+mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
+mvn -B -ntp versions:strip-snapshot-dependencies -DprocessAllModules=true -f "\${WORKSPACE}/pom.xml" || true
+mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
+                                        '''
+                                }
+
+                                withCredentials([usernamePassword(credentialsId: "${env.GIT_CRED}", usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PAT')]) {
+                                        sh '''#!/bin/bash
+set -euo pipefail
+
+git config user.name "Jenkins"
+git config user.email "jenkins@example.com"
+
+git add -A
+if git diff --staged --quiet; then
+    echo "No pom changes to commit"
+else
+    GIT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
+    git commit -m "[maven-release] Set release version to \${GIT_VERSION}" || true
+fi
+
+if [ "\${PUSH_CHANGES}" = "true" ]; then
+    ORIGIN_URL=$(git remote get-url origin || echo "")
+    if [ -z "$ORIGIN_URL" ]; then
+        echo "ERROR: no origin remote defined; cannot push" >&2
+        exit 1
+    fi
+
+    AUTH_URL_WITH_USER=$(echo "$ORIGIN_URL" | sed -E "s#https://(.*)#https://\${GIT_USER}@\\1#")
+    git remote set-url origin "$AUTH_URL_WITH_USER"
+
+    GIT_ASKPASS_SCRIPT=/tmp/git-askpass-$$.sh
+    cat > "$GIT_ASKPASS_SCRIPT" <<'EOF'
+#!/bin/bash
+echo "\${GIT_PAT}"
+EOF
+    chmod +x "$GIT_ASKPASS_SCRIPT"
+    export GIT_ASKPASS="$GIT_ASKPASS_SCRIPT"
+
+    BRANCH=$(git rev-parse --abbrev-ref HEAD || echo "HEAD")
+    echo "Pushing to origin $BRANCH..."
+    git push origin HEAD:$BRANCH
+
+    unset GIT_ASKPASS
+    rm -f "$GIT_ASKPASS_SCRIPT"
+    git remote set-url origin "$ORIGIN_URL"
+fi
+                                        '''
+                                }
+
+                                // Capture computed new release version from POM and export to env for later stages
+                                def computed = sh(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
+                                if (computed?.endsWith('-SNAPSHOT')) {
+                                        computed = computed.replaceAll('-SNAPSHOT$', '')
+                                }
+                                env.NEW_RELEASE = computed
+                        }
+                }
+        }
+
+    stage('Final Status') {
+        steps {
+        script {
+              def displayVersion = env.NEW_RELEASE ?: sh(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"UNKNOWN\"", returnStdout: true).trim()
+            if (displayVersion?.endsWith('-SNAPSHOT')) {
+            displayVersion = displayVersion.replaceAll('-SNAPSHOT$', '')
+            }
+            echo "Pipeline finished. PROCEED=${env.PROCEED} INC_TYPE=${env.INC_TYPE} NEW_RELEASE=${displayVersion} PUSH_CHANGES=${env.PUSH_CHANGES}"
+        }
+        }
+    }
+    }
+
+    post {
+        always {
+            script {
+            echo 'Cleanup or additional post steps can be run here.'
+            }
+        }
+    }
+}
