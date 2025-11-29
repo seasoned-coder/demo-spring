@@ -102,21 +102,28 @@ pipeline {
                     
                     // Use a locally trimmed variable and safer .equals() comparison
                     def incType = env.INC_TYPE?.trim()
-                    echo "INC_TYPE received for comparison: '${incType}'" // Added this log for next run verification
+                    echo "INC_TYPE received for comparison: '${incType}'"
 
+                    // Use explicit concatenation and defensive defaults to guarantee a string result.
                     if ('MAJOR'.equals(incType)) {
-                        newVersionToApply = "${nextMajorComponent}.0.0"
-                        nextReleaseComponent = nextMajorComponent
+                        def major = nextMajorComponent ?: '1'
+                        newVersionToApply = major + '.0.0'
+                        nextReleaseComponent = major
                     } else if ('MINOR'.equals(incType)) {
-                        // FIX: Use the correctly captured local variables here
-                        newVersionToApply = "${currentMajor}.${nextMinorComponent}.0"
-                        nextReleaseComponent = nextMinorComponent
+                        def major = currentMajor ?: '0'
+                        def minor = nextMinorComponent ?: '1'
+                        // CRITICAL FIX: Use simple string concatenation (+) to avoid Groovy GString coercion issues
+                        newVersionToApply = major + '.' + minor + '.0'
+                        nextReleaseComponent = minor
                     } else if ('PATCH'.equals(incType)) {
-                        // FIX: Use the correctly captured local variables here
-                        newVersionToApply = "${currentMajor}.${currentMinor}.${nextPatchComponent}"
-                        nextReleaseComponent = nextPatchComponent
+                        def major = currentMajor ?: '0'
+                        def minor = currentMinor ?: '0'
+                        def patch = nextPatchComponent ?: '1'
+                        // CRITICAL FIX: Use simple string concatenation (+) to avoid Groovy GString coercion issues
+                        newVersionToApply = major + '.' + minor + '.' + patch
+                        nextReleaseComponent = patch
                     } else {
-                        // If INC_TYPE is null/empty (i.e., SKIP_POM_UPDATE was true), this is the intended path
+                        // If INC_TYPE is null/empty, this is the intended path (SKIP_POM_UPDATE was true)
                         newVersionToApply = "N/A"
                         nextReleaseComponent = "N/A"
                     }
@@ -126,7 +133,7 @@ pipeline {
                     env.NEXT_RELEASE = nextReleaseComponent // Component version for logging
 
                     // Check for null assignment and ensure the value is good
-                    if (env.SKIP_POM_UPDATE == 'false' && (env.FULL_NEW_VERSION == 'N/A' || !env.FULL_NEW_VERSION || env.FULL_NEW_VERSION.contains("null"))) {
+                    if (env.SKIP_POM_UPDATE == 'false' && (env.FULL_NEW_VERSION == 'N/A' || !env.FULL_NEW_VERSION)) {
                         error("FATAL ERROR: Failed to reliably assemble the FULL_NEW_VERSION for increment type: ${env.INC_TYPE}. Result was: ${env.FULL_NEW_VERSION}")
                     }
 
