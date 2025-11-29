@@ -70,6 +70,7 @@ pipeline {
                 script {
                     echo 'Computing candidate next versions (major, minor, patch) from pom'
                     withMaven(maven: env.MAVEN_TOOL) {
+                            // Note: These Groovy variables use the same 'help:evaluate' method to get the properties
                             def nextMajor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
                             def nextMinor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
                             def nextPatch = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextIncrementalVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
@@ -133,7 +134,7 @@ mvn -B -ntp build-helper:parse-version -f "\${WORKSPACE}/pom.xml"
 # 2. Get the RAW next version component based on INC_TYPE
 case "\${INC_TYPE}" in
     MAJOR)
-        # We need the last non-empty line of output, as previous lines can be noise from other goals/modules
+        # RAW_OUTPUT contains the Maven output, which might include noise/errors
         RAW_OUTPUT=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
         ;;
     MINOR)
@@ -148,12 +149,9 @@ case "\${INC_TYPE}" in
         ;;
 esac
 
-# 2.5. FILTER: Extract the last non-empty line of the output, which should be the version component.
-# This handles the multi-module noise that was causing RAW_NEXT_VERSION to be empty or incorrect.
-RAW_NEXT_VERSION=$(echo "\${RAW_OUTPUT}" | awk 'NF' | tail -1 || echo "")
-
-# 2.6. FINAL FILTER: Explicitly filter the known Maven error message if it was captured as the version
-RAW_NEXT_VERSION=$(echo "\${RAW_NEXT_VERSION}" | grep -v 'null object or invalid expression' || echo "")
+# 2.5. ROBUST FILTERING: Filter the output to keep only lines that contain just a number (the expected version component).
+# This is the fix: we strictly look for lines containing only digits [0-9], which eliminates Maven noise/errors.
+RAW_NEXT_VERSION=$(echo "\${RAW_OUTPUT}" | grep -E '^[0-9]+$' | tail -1 || echo "")
 
 echo "Raw version component extracted: \${RAW_NEXT_VERSION}"
 
@@ -178,13 +176,14 @@ if [[ "\${RAW_NEXT_VERSION}" != *.* ]]; then
         # the appropriate 'X.Y.Z' format is applied.
         if [ "\${INC_TYPE}" = "MINOR" ]; then
              # Recalculate full version parts for MINOR and PATCH updates
-             CURRENT_MAJOR=$(mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.majorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null | awk 'NF' | tail -1 || echo "0")
+             # Note: We must re-read these parts since the RAW_NEXT_VERSION only contains the incremented part.
+             CURRENT_MAJOR=$(mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.majorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null | grep -E '^[0-9]+$' | tail -1 || echo "0")
              CURRENT_MINOR_INCREMENT="\${RAW_NEXT_VERSION}"
              NEW_RELEASE_VERSION="\${CURRENT_MAJOR}.\${CURRENT_MINOR_INCREMENT}.0"
 
         elif [ "\${INC_TYPE}" = "PATCH" ]; then
-             CURRENT_MAJOR=$(mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.majorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null | awk 'NF' | tail -1 || echo "0")
-             CURRENT_MINOR=$(mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.minorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null | awk 'NF' | tail -1 || echo "0")
+             CURRENT_MAJOR=$(mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.majorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null | grep -E '^[0-9]+$' | tail -1 || echo "0")
+             CURRENT_MINOR=$(mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.minorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null | grep -E '^[0-9]+$' | tail -1 || echo "0")
              CURRENT_PATCH_INCREMENT="\${RAW_NEXT_VERSION}"
              NEW_RELEASE_VERSION="\${CURRENT_MAJOR}.\${CURRENT_MINOR}.\${CURRENT_PATCH_INCREMENT}"
 
