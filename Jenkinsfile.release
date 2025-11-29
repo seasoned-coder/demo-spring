@@ -12,7 +12,6 @@ pipeline {
         disableConcurrentBuilds()
         timestamps()
         buildDiscarder(logRotator(numToKeepStr: '20', artifactNumToKeepStr: '10'))
-        skipDefaultCheckout()
     }
 
     stages {
@@ -48,20 +47,20 @@ pipeline {
         }
     }
 
-        stage('Update POM') {
-                agent any
-                when { expression { env.PROCEED == 'false' } }
-                options { timeout(time: 30, unit: 'MINUTES') }
-                steps {
-                        script {
-                                if (!env.INC_TYPE) {
-                                        error("INC_TYPE must be provided when you answered NO to the POM update question")
-                                }
+    stage('Update POM') {
+            agent any
+            when { expression { env.PROCEED == 'false' } }
+            options { timeout(time: 30, unit: 'MINUTES') }
+            steps {
+                    script {
+                            if (!env.INC_TYPE) {
+                                    error("INC_TYPE must be provided when you answered NO to the POM update question")
+                            }
 
-                                echo "Updating POM based on increment type ${env.INC_TYPE}..."
+                            echo "Updating POM based on increment type ${env.INC_TYPE}..."
 
-                                withMaven(maven: env.MAVEN_TOOL, publisherStrategy: 'EXPLICIT') {
-                                        sh '''#!/bin/bash
+                            withMaven(maven: env.MAVEN_TOOL, publisherStrategy: 'EXPLICIT') {
+                                    sh '''#!/bin/bash
 set -euo pipefail
 
 if [ ! -f pom.xml ]; then
@@ -91,10 +90,10 @@ mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
 mvn -B -ntp versions:strip-snapshot-dependencies -DprocessAllModules=true -f "\${WORKSPACE}/pom.xml" || true
 mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
                                         '''
-                                }
+                            }
 
-                                withCredentials([usernamePassword(credentialsId: "${env.GIT_CRED}", usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PAT')]) {
-                                        sh '''#!/bin/bash
+                            withCredentials([usernamePassword(credentialsId: "${env.GIT_CRED}", usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PAT')]) {
+                                    sh '''#!/bin/bash
 set -euo pipefail
 
 git config user.name "Jenkins"
@@ -135,17 +134,17 @@ EOF
     git remote set-url origin "$ORIGIN_URL"
 fi
                                         '''
-                                }
+                            }
 
-                                // Capture computed new release version from POM and export to env for later stages
-                                def computed = sh(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
-                                if (computed?.endsWith('-SNAPSHOT')) {
-                                        computed = computed.replaceAll('-SNAPSHOT$', '')
-                                }
-                                env.NEW_RELEASE = computed
-                        }
-                }
-        }
+                            // Capture computed new release version from POM and export to env for later stages
+                            def computed = sh(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
+                            if (computed?.endsWith('-SNAPSHOT')) {
+                                    computed = computed.replaceAll('-SNAPSHOT$', '')
+                            }
+                            env.NEW_RELEASE = computed
+                    }
+            }
+    }
 
     stage('Final Status') {
         steps {
