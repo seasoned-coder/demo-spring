@@ -194,23 +194,27 @@ mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
                     withCredentials([usernamePassword(credentialsId: "${env.GIT_CRED}", usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PAT')]) {
                         echo "PUSH_CHANGES=${env.PUSH_CHANGES}"
                         
-                        // Determine the branch name to push to. 
-                        // This uses the reliable Jenkins environment variable BRANCH_NAME, 
-                        // falling back to 'main' if it cannot be determined.
-                        def branchName = env.BRANCH_NAME ?: 'main' 
-                        
                         sh '''#!/bin/bash
 set -euo pipefail
 
 git config user.name "Jenkins"
 git config user.email "jenkins@example.com"
 
+# 1. Get the new version that was just applied to the POM (clean, non-SNAPSHOT version)
+NEW_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f "\${WORKSPACE}/pom.xml" 2>/dev/null | sed 's/-SNAPSHOT$//' || echo "1.0.0")
+NEW_RELEASE_BRANCH="release-\${NEW_VERSION}"
+
+# 2. Commit the changes (happens on detached HEAD)
 git add -A
 if git diff --staged --quiet; then
     echo "No pom changes to commit"
 else
-    GIT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
-    git commit -m "[maven-release] Set release version to \${GIT_VERSION}" || true
+    # Use the cleaned version for the commit message
+    git commit -m "[maven-release] Set release version to \${NEW_VERSION}" || true
+    
+    # 3. Create a new local branch pointing to the new commit (HEAD)
+    echo "Creating new local branch: \${NEW_RELEASE_BRANCH} pointing to HEAD"
+    git branch "\${NEW_RELEASE_BRANCH}" HEAD
 fi
 
 if [ "\${PUSH_CHANGES}" = "true" ]; then
@@ -231,12 +235,10 @@ EOF
     chmod +x "$GIT_ASKPASS_SCRIPT"
     export GIT_ASKPASS="$GIT_ASKPASS_SCRIPT"
 
-    # Inject Groovy branchName variable for a fully qualified remote ref.
-    BRANCH=''' + branchName + '''
-    
-    echo "PUSH_CHANGES=${PUSH_CHANGES}. Pushing to origin $BRANCH..."
-    # Source is HEAD (the new commit), destination is the actual branch name ($BRANCH)
-    git push origin HEAD:$BRANCH
+    echo "PUSH_CHANGES=${PUSH_CHANGES}. Pushing new branch \${NEW_RELEASE_BRANCH} to origin..."
+    # 4. Push the new local branch to the remote, creating it there.
+    # Source and Destination are both the new branch name.
+    git push origin "\${NEW_RELEASE_BRANCH}"
 
     unset GIT_ASKPASS
     rm -f "$GIT_ASKPASS_SCRIPT"
