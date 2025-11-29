@@ -47,11 +47,7 @@ pipeline {
                 checkout scm
                 // Short debug listing of workspace to confirm files like pom.xml exist
                 script {
-                    if (isUnix()) {
-                        sh 'pwd; ls -la'
-                    } else {
-                        bat 'dir'
-                    }
+                    sh 'pwd; ls -la'
                 }
             }
         }
@@ -62,11 +58,7 @@ pipeline {
                 script {
                     echo 'Building and running tests for all modules'
                     withMaven(maven: env.MAVEN_TOOL) {
-                        if (isUnix()) {
-                            sh 'mvn -B -ntp test'
-                        } else {
-                            bat 'mvn -B -ntp test'
-                        }
+                        sh 'mvn -B -ntp test'
                     }
                 }
             }
@@ -78,9 +70,9 @@ pipeline {
                 script {
                     echo 'Computing candidate next versions (major, minor, patch) from pom'
                     withMaven(maven: env.MAVEN_TOOL) {
-                            def nextMajor = isUnix() ? sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim() : bat(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f %WORKSPACE%/pom.xml", returnStdout: true).trim()
-                            def nextMinor = isUnix() ? sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim() : bat(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f %WORKSPACE%/pom.xml", returnStdout: true).trim()
-                            def nextPatch = isUnix() ? sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextIncrementalVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim() : bat(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextIncrementalVersion -DforceStdout -q -f %WORKSPACE%/pom.xml", returnStdout: true).trim()
+                            def nextMajor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
+                            def nextMinor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
+                            def nextPatch = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextIncrementalVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"\"", returnStdout: true).trim()
 
                             if (nextMinor) {
                                 env.NEXT_RELEASE = nextMinor
@@ -112,8 +104,7 @@ pipeline {
                     echo "Updating POM based on increment type ${env.INC_TYPE}..."
 
                     withMaven(maven: env.MAVEN_TOOL, publisherStrategy: 'EXPLICIT') {
-                        if (isUnix()) {
-                            sh '''#!/bin/bash
+                        sh '''#!/bin/bash
 set -euo pipefail
 
 if [ ! -f pom.xml ]; then
@@ -121,45 +112,62 @@ if [ ! -f pom.xml ]; then
     exit 1
 fi
 
-echo "Parsing project version and applying increment"
+echo "Parsing project version and calculating next semantic version"
+
+# 1. Ensure build-helper:parse-version runs to populate properties
+mvn -B -ntp build-helper:parse-version -f "\${WORKSPACE}/pom.xml"
+
+# 2. Get the RAW next version component based on INC_TYPE
 case "\${INC_TYPE}" in
     MAJOR)
-        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion='\${parsedVersion.nextMajorVersion}' -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+        RAW_NEXT_VERSION=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null)
         ;;
     MINOR)
-        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion='\${parsedVersion.nextMinorVersion}' -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+        RAW_NEXT_VERSION=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null)
         ;;
     PATCH)
-        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion='\${parsedVersion.nextIncrementalVersion}' -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+        RAW_NEXT_VERSION=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextIncrementalVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null)
         ;;
     *)
         echo "Unknown INC_TYPE '\${INC_TYPE}', defaulting to MINOR"
-        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion='\${parsedVersion.nextMinorVersion}' -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+        RAW_NEXT_VERSION=$(mvn -B -ntp help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f "\${WORKSPACE}/pom.xml" 2>/dev/null)
         ;;
 esac
 
-echo "Committing changes and updating SNAPSHOT dependencies to latest release"
+# 3. Sanitize the RAW version to ensure X.Y.Z semantic format and remove -SNAPSHOT
+# If the version does not contain a dot (e.g., '2'), append '.0.0'.
+if [[ "\${RAW_NEXT_VERSION}" != *.* ]]; then
+    NEW_RELEASE_VERSION="\${RAW_NEXT_VERSION}.0.0"
+else
+    # Otherwise, just remove the -SNAPSHOT qualifier if it was included in the calculation.
+    NEW_RELEASE_VERSION="\$(echo "\${RAW_NEXT_VERSION}" | sed 's/-SNAPSHOT$//')"
+fi
+
+echo "Setting new semantic release version: \${NEW_RELEASE_VERSION}"
+
+# 4. Apply the fully qualified, non-SNAPSHOT version
+mvn -B -ntp versions:set -DnewVersion="\${NEW_RELEASE_VERSION}" -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+
+echo "Committing project version change"
 mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
 
-# UPDATED: Replaced strip-snapshot-dependencies with use-releases to align with the release prep intent.
+echo "Updating SNAPSHOT dependencies to latest release"
 mvn -B -ntp versions:use-releases -DprocessAllModules=true -f "\${WORKSPACE}/pom.xml" || true
 
+echo "Committing dependency updates"
 mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
                             '''
-                        } else {
-                            error('Windows agent not supported for POM update. Please run on a Unix agent or implement a Windows equivalent.')
-                        }
                     }
 
                     withCredentials([usernamePassword(credentialsId: "${env.GIT_CRED}", usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PAT')]) {
                         echo "PUSH_CHANGES=${env.PUSH_CHANGES}"
-                        if (isUnix()) {
-                            // Determine the branch name to push to. 
-                            // This uses the reliable Jenkins environment variable BRANCH_NAME, 
-                            // falling back to 'main' if it cannot be determined.
-                            def branchName = env.BRANCH_NAME ?: 'main' 
-                            
-                            sh '''#!/bin/bash
+                        
+                        // Determine the branch name to push to. 
+                        // This uses the reliable Jenkins environment variable BRANCH_NAME, 
+                        // falling back to 'main' if it cannot be determined.
+                        def branchName = env.BRANCH_NAME ?: 'main' 
+                        
+                        sh '''#!/bin/bash
 set -euo pipefail
 
 git config user.name "Jenkins"
@@ -191,7 +199,7 @@ EOF
     chmod +x "$GIT_ASKPASS_SCRIPT"
     export GIT_ASKPASS="$GIT_ASKPASS_SCRIPT"
 
-    # Fix: Inject Groovy branchName variable for a fully qualified remote ref.
+    # Inject Groovy branchName variable for a fully qualified remote ref.
     BRANCH=''' + branchName + '''
     
     echo "PUSH_CHANGES=${PUSH_CHANGES}. Pushing to origin $BRANCH..."
@@ -203,31 +211,6 @@ EOF
     git remote set-url origin "$ORIGIN_URL"
 fi
                             '''
-                        } else {
-                            bat '''@echo off
-setlocal enabledelyedexpansion
-git config user.name "Jenkins"
-git config user.email "jenkins@example.com"
-git add -A
-git diff --staged --quiet || (
-    FOR /F "delims=" %%i IN ('mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f %WORKSPACE%/pom.xml 2^>nul') DO set GIT_VERSION=%%i
-    git commit -m "[maven-release] Set release version !GIT_VERSION!" || exit /b 0
-)
-if "%PUSH_CHANGES%"=="true" (
-    REM attempt to push
-    set ORIGIN_URL=
-    set "ORIGIN_URL="
-    for /f "delims=" %%u in ('git remote get-url origin 2^>nul') do set ORIGIN_URL=%%u
-    if not defined ORIGIN_URL (
-        echo ERROR: no origin remote defined; cannot push
-        exit /b 1
-    )
-    REM Git auth with token not implemented in batch fallback
-    echo "PUSH_CHANGES=%PUSH_CHANGES%. Running push to origin (not implemented on Windows fallback)."
-)
-endlocal
-                            '''
-                        }
                     }
 
                     // Capture computed new release version from POM and export to env for later stages
@@ -247,11 +230,7 @@ endlocal
                     def displayVersion = env.NEW_RELEASE ?: env.NEXT_RELEASE
                     if (!displayVersion) {
                         displayVersion = withMaven(maven: env.MAVEN_TOOL) {
-                            if (isUnix()) {
-                                sh(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"UNKNOWN\"", returnStdout: true).trim()
-                            } else {
-                                bat(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f %WORKSPACE%/pom.xml", returnStdout: true).trim()
-                            }
+                            sh(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"UNKNOWN\"", returnStdout: true).trim()
                         }
                     }
                     if (displayVersion?.endsWith('-SNAPSHOT')) {
