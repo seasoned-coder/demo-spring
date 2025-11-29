@@ -9,8 +9,7 @@ pipeline {
     }
 
     options {
-        // ADDED: This stops Jenkins from automatically cloning/checking out the repository 
-        // at the start of every stage, relying on the explicit 'Checkout' stage instead.
+        // Stops Jenkins from automatically cloning/checking out the repository at the start of every stage
         skipDefaultCheckout()
         ansiColor('xterm')
         timeout(time: 1, unit: 'HOURS')
@@ -25,7 +24,6 @@ pipeline {
             options { timeout(time: 1, unit: 'HOURS') }
             steps {
                 script {
-                    // multi-parameter input; returns a Map
                     def inputResult = input(
                     id: 'pomUpdate',
                     message: 'Has the POM for this project been updated with the new release version?',
@@ -38,8 +36,11 @@ pipeline {
                     )
 
                     env.SKIP_POM_UPDATE = inputResult.SKIP_POM_UPDATE.toString()
+                    // Trim and ensure the input is exactly MINOR/MAJOR/PATCH string
                     env.INC_TYPE = inputResult.INC_TYPE?.trim()
                     env.PUSH_CHANGES = inputResult.PUSH_CHANGES.toString()
+                    
+                    echo "User Input - SKIP_POM_UPDATE: ${env.SKIP_POM_UPDATE}, INC_TYPE: ${env.INC_TYPE}"
                 }
             }
         }
@@ -48,12 +49,8 @@ pipeline {
             agent any
             steps {
                 echo "Ensuring workspace has a checked-out repository..."
-                // Ensure a workspace is present and checkout takes place for stages that require files
                 checkout scm
-                // Short debug listing of workspace to confirm files like pom.xml exist
-                script {
-                    sh 'pwd; ls -la'
-                }
+                script { sh 'pwd; ls -la' }
             }
         }
 
@@ -74,44 +71,63 @@ pipeline {
             steps {
                 script {
                     echo 'Computing candidate next versions (major, minor, patch) from pom'
+                    
+                    // Define Groovy variables to hold the extracted version components
+                    def currentMajor
+                    def currentMinor
+                    def nextMajorComponent
+                    def nextMinorComponent
+                    def nextPatchComponent
+                    
                     withMaven(maven: env.MAVEN_TOOL) {
-                        // Get all version components (current and next)
-                        // Note: Using explicit error suppression and fallback '|| echo "0"' to handle verbose/empty output gracefully
-                        def currentMajor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.majorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"0\"", returnStdout: true).trim()
-                        def currentMinor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.minorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"0\"", returnStdout: true).trim()
+                        // Capture the output of each mvn command directly into a local Groovy variable
+                        currentMajor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.majorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"0\"", returnStdout: true).trim()
+                        currentMinor = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.minorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"0\"", returnStdout: true).trim()
                         
-                        def nextMajorComponent = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"1\"", returnStdout: true).trim()
-                        def nextMinorComponent = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"0\"", returnStdout: true).trim()
-                        def nextPatchComponent = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextIncrementalVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"0\"", returnStdout: true).trim()
-
-                        // 1. Assemble the full version string based on the user's INC_TYPE (NEW LOGIC)
-                        def newVersionToApply = ''
-                        def nextReleaseComponent = nextMinorComponent
-
-                        if (env.INC_TYPE == 'MAJOR') {
-                            newVersionToApply = "${nextMajorComponent}.0.0"
-                            nextReleaseComponent = nextMajorComponent
-                        } else if (env.INC_TYPE == 'MINOR') {
-                            newVersionToApply = "${currentMajor}.${nextMinorComponent}.0"
-                            nextReleaseComponent = nextMinorComponent
-                        } else if (env.INC_TYPE == 'PATCH') {
-                            newVersionToApply = "${currentMajor}.${currentMinor}.${nextPatchComponent}"
-                            nextReleaseComponent = nextPatchComponent
-                        } else {
-                            // If INC_TYPE is null (i.e., SKIP_POM_UPDATE was true), use a placeholder/current version for logs
-                            newVersionToApply = "N/A"
-                        }
-
-                        // Set the full version and the component version in the environment
-                        env.FULL_NEW_VERSION = newVersionToApply
-                        env.NEXT_RELEASE = nextReleaseComponent // Keeping this for backward compatibility with user's original logic
-
-                        echo "Computed next-major: ${nextMajorComponent}"
-                        echo "Computed next-minor: ${nextMinorComponent}"
-                        echo "Computed next-patch: ${nextPatchComponent}"
-                        echo "NEXT_RELEASE (component) set to ${env.NEXT_RELEASE}"
-                        echo "FULL_NEW_VERSION (assembled) set to ${env.FULL_NEW_VERSION}" // NEW LOG
+                        nextMajorComponent = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMajorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"1\"", returnStdout: true).trim()
+                        nextMinorComponent = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextMinorVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"0\"", returnStdout: true).trim()
+                        nextPatchComponent = sh(script: "mvn -B -ntp build-helper:parse-version help:evaluate -Dexpression=parsedVersion.nextIncrementalVersion -DforceStdout -q -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"0\"", returnStdout: true).trim()
                     }
+
+                    // Log the components for debugging
+                    echo "Current Major: ${currentMajor}"
+                    echo "Current Minor: ${currentMinor}"
+                    echo "Next Major Component: ${nextMajorComponent}"
+                    echo "Next Minor Component: ${nextMinorComponent}"
+                    echo "Next Patch Component: ${nextPatchComponent}"
+                    
+                    // 1. Assemble the full version string based on the user's INC_TYPE
+                    def newVersionToApply = null
+                    def nextReleaseComponent = null
+
+                    if (env.INC_TYPE == 'MAJOR') {
+                        newVersionToApply = "${nextMajorComponent}.0.0"
+                        nextReleaseComponent = nextMajorComponent
+                    } else if (env.INC_TYPE == 'MINOR') {
+                        // FIX: Use the correctly captured local variables here
+                        newVersionToApply = "${currentMajor}.${nextMinorComponent}.0"
+                        nextReleaseComponent = nextMinorComponent
+                    } else if (env.INC_TYPE == 'PATCH') {
+                        // FIX: Use the correctly captured local variables here
+                        newVersionToApply = "${currentMajor}.${currentMinor}.${nextPatchComponent}"
+                        nextReleaseComponent = nextPatchComponent
+                    } else {
+                        // If INC_TYPE is null/empty (i.e., SKIP_POM_UPDATE was true), this is the intended path
+                        newVersionToApply = "N/A"
+                        nextReleaseComponent = "N/A"
+                    }
+
+                    // Set the environment variables
+                    env.FULL_NEW_VERSION = newVersionToApply
+                    env.NEXT_RELEASE = nextReleaseComponent // Component version for logging
+
+                    // Check for null assignment and ensure the value is good
+                    if (env.SKIP_POM_UPDATE == 'false' && (env.FULL_NEW_VERSION == 'N/A' || !env.FULL_NEW_VERSION || env.FULL_NEW_VERSION.contains("null"))) {
+                        error("FATAL ERROR: Failed to reliably assemble the FULL_NEW_VERSION for increment type: ${env.INC_TYPE}. Result was: ${env.FULL_NEW_VERSION}")
+                    }
+
+                    echo "NEXT_RELEASE (component) set to ${env.NEXT_RELEASE}"
+                    echo "FULL_NEW_VERSION (assembled) set to ${env.FULL_NEW_VERSION}"
                 }
             }
         }
@@ -132,8 +148,7 @@ pipeline {
                     echo "Updating POM to version ${env.FULL_NEW_VERSION} based on increment type ${env.INC_TYPE}..."
 
                     withMaven(maven: env.MAVEN_TOOL, publisherStrategy: 'EXPLICIT') {
-                        // We use the FULL_NEW_VERSION calculated reliably in Groovy, 
-                        // eliminating the fragile shell script version calculation logic.
+                        // Shell script uses the Groovy environment variable FULL_NEW_VERSION
                         sh '''#!/bin/bash
 set -euo pipefail
 
@@ -142,12 +157,11 @@ if [ ! -f pom.xml ]; then
     exit 1
 fi
 
-# Use the pre-calculated Groovy variable directly!
 NEW_RELEASE_VERSION="${FULL_NEW_VERSION}"
 
 echo "Setting new semantic release version: \${NEW_RELEASE_VERSION}"
 
-# 4. Apply the fully qualified, non-SNAPSHOT version
+# 1. Apply the fully qualified, non-SNAPSHOT version
 mvn -B -ntp versions:set -DnewVersion="\${NEW_RELEASE_VERSION}" -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
 
 echo "Committing project version change"
@@ -170,13 +184,11 @@ set -euo pipefail
 git config user.name "Jenkins"
 git config user.email "jenkins@example.com"
 
-# 1. Get the new version that was just applied to the POM (clean, non-SNAPSHOT version)
-# We ensure we get the correct version from the parent pom.xml by using the local workspace file path
-# We must re-evaluate here as the last set command might have been in Groovy (which doesn't affect the shell)
+# Re-evaluate the version from the updated POM to ensure accuracy
 NEW_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f "\${WORKSPACE}/pom.xml" 2>/dev/null | sed 's/-SNAPSHOT$//' || echo "1.0.0")
 NEW_RELEASE_BRANCH="release-\${NEW_VERSION}"
 
-# 2. Commit the changes (happens on detached HEAD)
+# Commit the changes (happens on detached HEAD)
 git add -A
 if git diff --staged --quiet; then
     echo "No pom changes to commit"
@@ -184,11 +196,11 @@ else
     # Use the cleaned version for the commit message
     git commit -m "[maven-release] Set release version to \${NEW_VERSION}" || true
     
-    # 3. Create a new local branch pointing to the new commit (HEAD)
+    # Create a new local branch pointing to the new commit (HEAD)
     echo "Creating new local branch: \${NEW_RELEASE_BRANCH} pointing to HEAD"
     git branch "\${NEW_RELEASE_BRANCH}" HEAD
 
-    # 4. Define the timestamped tag
+    # Define the timestamped tag
     TIMESTAMP=$(date +%Y%m%d%H%M%S)
     RELEASE_TAG="\${NEW_VERSION}-\${TIMESTAMP}"
     echo "Creating tag: \${RELEASE_TAG}"
@@ -202,11 +214,12 @@ if [ "\${PUSH_CHANGES}" = "true" ]; then
         exit 1
     fi
 
+    # Inject credentials into the URL for push
     AUTH_URL_WITH_USER=$(echo "$ORIGIN_URL" | sed -E "s#https://(.*)#https://\${GIT_USER}@\\1#")
     git remote set-url origin "$AUTH_URL_WITH_USER"
 
     GIT_ASKPASS_SCRIPT=/tmp/git-askpass-$$.sh
-    cat > "$GIT_ASKPASS_SCRIPT" <<'EOF'
+    cat > "$GIT_ASKPASS_SCRIPT" <<EOF
 #!/bin/bash
 echo "\${GIT_PAT}"
 EOF
@@ -214,10 +227,7 @@ EOF
     export GIT_ASKPASS="$GIT_ASKPASS_SCRIPT"
 
     echo "PUSH_CHANGES=${PUSH_CHANGES}. Pushing new branch \${NEW_RELEASE_BRANCH} and tag \${RELEASE_TAG} to origin..."
-    # Push the new local branch to the remote, creating it there.
     git push origin "\${NEW_RELEASE_BRANCH}"
-    
-    # Push the newly created tag
     git push origin "\${RELEASE_TAG}"
 
     unset GIT_ASKPASS
@@ -240,9 +250,9 @@ fi
         stage('Final Status') {
             steps {
                 script {
-                    // Ensure configured maven tool is available for this final evaluation (prevents mvn not found)
-                    def displayVersion = env.NEW_RELEASE ?: env.NEXT_RELEASE
-                    if (!displayVersion) {
+                    def displayVersion = env.NEW_RELEASE ?: env.FULL_NEW_VERSION ?: env.NEXT_RELEASE
+
+                    if (!displayVersion || displayVersion == 'N/A') {
                         displayVersion = withMaven(maven: env.MAVEN_TOOL) {
                             sh(script: "mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f ${env.WORKSPACE}/pom.xml 2>/dev/null || echo \"UNKNOWN\"", returnStdout: true).trim()
                         }
@@ -250,7 +260,7 @@ fi
                     if (displayVersion?.endsWith('-SNAPSHOT')) {
                     displayVersion = displayVersion.replaceAll('-SNAPSHOT$', '')
                     }
-                    echo "Pipeline finished. SKIP_POM_UPDATE=${env.SKIP_POM_UPDATE} INC_TYPE=${env.INC_TYPE} NEW_RELEASE=${displayVersion} NEXT_RELEASE=${env.NEXT_RELEASE} PUSH_CHANGES=${env.PUSH_CHANGES}"
+                    echo "Pipeline finished. SKIP_POM_UPDATE=${env.SKIP_POM_UPDATE} INC_TYPE=${env.INC_TYPE} FINAL_VERSION=${displayVersion} PUSH_CHANGES=${env.PUSH_CHANGES}"
                 }
             }
         }
