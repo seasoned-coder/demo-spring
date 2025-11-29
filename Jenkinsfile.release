@@ -122,59 +122,29 @@ if [ ! -f pom.xml ]; then
 fi
 
 echo "Parsing project version and applying increment"
-case "\${INC_TYPE}" in
+case "${INC_TYPE}" in
     MAJOR)
-        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=\${parsedVersion.nextMajorVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=${parsedVersion.nextMajorVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "${WORKSPACE}/pom.xml"
         ;;
     MINOR)
-        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=\${parsedVersion.nextMinorVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=${parsedVersion.nextMinorVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "${WORKSPACE}/pom.xml"
         ;;
     PATCH)
-        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=\${parsedVersion.nextIncrementalVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=${parsedVersion.nextIncrementalVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "${WORKSPACE}/pom.xml"
         ;;
     *)
-        echo "Unknown INC_TYPE '\${INC_TYPE}', defaulting to MINOR"
-        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=\${parsedVersion.nextMinorVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
+        echo "Unknown INC_TYPE '${INC_TYPE}', defaulting to MINOR"
+        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=${parsedVersion.nextMinorVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "${WORKSPACE}/pom.xml"
         ;;
 esac
 
 echo "Committing changes and stripping SNAPSHOT dependencies"
-mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
-mvn -B -ntp versions:strip-snapshot-dependencies -DprocessAllModules=true -f "\${WORKSPACE}/pom.xml" || true
-mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
+mvn -B -ntp versions:commit -f "${WORKSPACE}/pom.xml"
+mvn -B -ntp versions:strip-snapshot-dependencies -DprocessAllModules=true -f "${WORKSPACE}/pom.xml" || true
+mvn -B -ntp versions:commit -f "${WORKSPACE}/pom.xml"
                             '''
                         } else {
                             error('Windows agent not supported for POM update. Please run on a Unix agent or implement a Windows equivalent.')
-                        }
-                    }
-
-if [ ! -f pom.xml ]; then
-    echo "ERROR: pom.xml not found in workspace"
-    exit 1
-fi
-
-echo "Parsing project version and applying increment"
-case "\${INC_TYPE}" in
-    MAJOR)
-        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=\${parsedVersion.nextMajorVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
-        ;;
-    MINOR)
-        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=\${parsedVersion.nextMinorVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
-        ;;
-    PATCH)
-        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=\${parsedVersion.nextIncrementalVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
-        ;;
-    *)
-        echo "Unknown INC_TYPE '\${INC_TYPE}', defaulting to MINOR"
-        mvn -B -ntp build-helper:parse-version versions:set -DnewVersion=\${parsedVersion.nextMinorVersion} -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
-        ;;
-esac
-
-echo "Committing changes and stripping SNAPSHOT dependencies"
-mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
-mvn -B -ntp versions:strip-snapshot-dependencies -DprocessAllModules=true -f "\${WORKSPACE}/pom.xml" || true
-mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
-                            '''
                         }
                     }
 
@@ -191,24 +161,24 @@ git add -A
 if git diff --staged --quiet; then
     echo "No pom changes to commit"
 else
-    GIT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f "\${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
-    git commit -m "[maven-release] Set release version to \${GIT_VERSION}" || true
+    GIT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout -f "${WORKSPACE}/pom.xml" 2>/dev/null || echo "")
+    git commit -m "[maven-release] Set release version to ${GIT_VERSION}" || true
 fi
 
-if [ "\${PUSH_CHANGES}" = "true" ]; then
+if [ "${PUSH_CHANGES}" = "true" ]; then
     ORIGIN_URL=$(git remote get-url origin || echo "")
     if [ -z "$ORIGIN_URL" ]; then
         echo "ERROR: no origin remote defined; cannot push" >&2
         exit 1
     fi
 
-    AUTH_URL_WITH_USER=$(echo "$ORIGIN_URL" | sed -E "s#https://(.*)#https://\${GIT_USER}@\\1#")
+    AUTH_URL_WITH_USER=$(echo "$ORIGIN_URL" | sed -E "s#https://(.*)#https://${GIT_USER}@\\1#")
     git remote set-url origin "$AUTH_URL_WITH_USER"
 
     GIT_ASKPASS_SCRIPT=/tmp/git-askpass-$$.sh
     cat > "$GIT_ASKPASS_SCRIPT" <<'EOF'
 #!/bin/bash
-echo "\${GIT_PAT}"
+echo "${GIT_PAT}"
 EOF
     chmod +x "$GIT_ASKPASS_SCRIPT"
     export GIT_ASKPASS="$GIT_ASKPASS_SCRIPT"
@@ -235,8 +205,9 @@ git diff --staged --quiet || (
 if "%PUSH_CHANGES%"=="true" (
     REM attempt to push
     set ORIGIN_URL=
+    set "ORIGIN_URL="
     for /f "delims=" %%u in ('git remote get-url origin 2^>nul') do set ORIGIN_URL=%%u
-    if "%ORIGIN_URL%"=="" (
+    if not defined ORIGIN_URL (
         echo ERROR: no origin remote defined; cannot push
         exit /b 1
     )
