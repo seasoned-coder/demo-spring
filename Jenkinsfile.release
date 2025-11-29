@@ -154,6 +154,11 @@ mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
                     withCredentials([usernamePassword(credentialsId: "${env.GIT_CRED}", usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PAT')]) {
                         echo "PUSH_CHANGES=${env.PUSH_CHANGES}"
                         if (isUnix()) {
+                            // Determine the branch name to push to. 
+                            // This uses the reliable Jenkins environment variable BRANCH_NAME, 
+                            // falling back to 'main' if it cannot be determined.
+                            def branchName = env.BRANCH_NAME ?: 'main' 
+                            
                             sh '''#!/bin/bash
 set -euo pipefail
 
@@ -186,8 +191,11 @@ EOF
     chmod +x "$GIT_ASKPASS_SCRIPT"
     export GIT_ASKPASS="$GIT_ASKPASS_SCRIPT"
 
-    BRANCH=$(git rev-parse --abbrev-ref HEAD || echo "HEAD")
+    # Fix: Inject Groovy branchName variable for a fully qualified remote ref.
+    BRANCH=''' + branchName + '''
+    
     echo "PUSH_CHANGES=${PUSH_CHANGES}. Pushing to origin $BRANCH..."
+    # Source is HEAD (the new commit), destination is the actual branch name ($BRANCH)
     git push origin HEAD:$BRANCH
 
     unset GIT_ASKPASS
