@@ -124,27 +124,26 @@ fi
 echo "Parsing project version and applying increment"
 case "\${INC_TYPE}" in
     MAJOR)
-        # FIX: Added single quotes to prevent 'bad substitution' error from bash
         mvn -B -ntp build-helper:parse-version versions:set -DnewVersion='\${parsedVersion.nextMajorVersion}' -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
         ;;
     MINOR)
-        # FIX: Added single quotes to prevent 'bad substitution' error from bash
         mvn -B -ntp build-helper:parse-version versions:set -DnewVersion='\${parsedVersion.nextMinorVersion}' -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
         ;;
     PATCH)
-        # FIX: Added single quotes to prevent 'bad substitution' error from bash
         mvn -B -ntp build-helper:parse-version versions:set -DnewVersion='\${parsedVersion.nextIncrementalVersion}' -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
         ;;
     *)
         echo "Unknown INC_TYPE '\${INC_TYPE}', defaulting to MINOR"
-        # FIX: Added single quotes to prevent 'bad substitution' error from bash
         mvn -B -ntp build-helper:parse-version versions:set -DnewVersion='\${parsedVersion.nextMinorVersion}' -DprocessAllModules=true -DgenerateBackupPoms=false -f "\${WORKSPACE}/pom.xml"
         ;;
 esac
 
 echo "Committing changes and stripping SNAPSHOT dependencies"
 mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
-mvn -B -ntp versions:strip-snapshot-dependencies -DprocessAllModules=true -f "\${WORKSPACE}/pom.xml" || true
+
+# FIX: Force versions-maven-plugin to a known version (2.16.0) that supports the strip-snapshot-dependencies goal.
+mvn -B -ntp org.codehaus.mojo:versions-maven-plugin:2.16.0:strip-snapshot-dependencies -DprocessAllModules=true -f "\${WORKSPACE}/pom.xml" || true
+
 mvn -B -ntp versions:commit -f "\${WORKSPACE}/pom.xml"
                             '''
                         } else {
@@ -198,7 +197,7 @@ fi
                             '''
                         } else {
                             bat '''@echo off
-setlocal enabledelayedexpansion
+setlocal enabledelyedexpansion
 git config user.name "Jenkins"
 git config user.email "jenkins@example.com"
 git add -A
